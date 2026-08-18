@@ -1,110 +1,125 @@
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { PromptTemplate } from '@langchain/core/prompts';
-import { RunnableSequence } from '@langchain/core/runnables';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { BaseRetriever } from '@langchain/core/retrievers';
 import { Document } from '@langchain/core/documents';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 
-/**
- * TODO(faza #2): gemini-1.5-flash je ugašen — svi pozivi vraćaju 404.
- * Migracija je samo izmena env varijable, bez diranja koda.
- */
-export const CHAT_MODEL = process.env.CHAT_MODEL ?? 'gemini-1.5-flash';
+export const CHAT_MODEL = process.env.CHAT_MODEL ?? 'gemini-3.6-flash';
 
-/** Koliko konteksta iz dokumenata šaljemo modelu. */
-const MAX_CONTEXT_CHARS = 6_000;
-/** Koliko poslednjih razmena istorije zadržavamo. */
+/** Ukupan budžet konteksta koji šaljemo modelu. */
+const MAX_CONTEXT_CHARS = 12_000;
+/** Koliko poslednjih razmena istorije koristimo. */
 const HISTORY_TURNS = 3;
-/** Gornja granica po poruci u istoriji. */
-const MAX_HISTORY_CHARS_PER_TURN = 500;
+const MAX_HISTORY_CHARS_PER_TURN = 400;
 
-export interface ChainInput {
-  question: string;
-  chat_history?: [string, string][];
+export interface SourceRef {
+  label: string;
+  filename: string;
+  excerpt: string;
+}
+
+export interface AnswerResult {
+  text: string;
+  sources: SourceRef[];
+  standaloneQuestion: string;
 }
 
 // ---------------------------------------------------------------------------
-// Prompt šabloni
+// Promptovi
 // ---------------------------------------------------------------------------
 
-const NATURAL_CONVERSATION_PROMPT = PromptTemplate.fromTemplate(`
-Evo šta sam pronašao u dokumentima: {context}
+/**
+ * Preformulisanje follow-up pitanja u samostalno.
+ *
+ * Bez ovog koraka u vektorsku pretragu ide sirovo pitanje, pa "a koliko to
+ * košta?" nema upotrebljiv signal — pretraga ne zna šta je "to" i vraća
+ * nasumične fragmente.
+ */
+const CONDENSE_PROMPT = PromptTemplate.fromTemplate(`
+Prethodni razgovor:
+{chat_history}
+
+Novo pitanje: {question}
+
+Preformuliši novo pitanje tako da bude razumljivo samo za sebe, bez konteksta razgovora.
+Zadrži sve konkretne pojmove: destinacije, datume, nazive aranžmana, tip prevoza.
+Ako je pitanje već samostalno, vrati ga nepromenjeno.
+Odgovori isključivo preformulisanim pitanjem, bez uvoda i objašnjenja.`);
+
+/**
+ * Jedan prompt umesto ranijih pet "ličnosti".
+ * Ton je neutralno-informativan, naglasak na tačnosti brojeva.
+ */
+const ANSWER_PROMPT = PromptTemplate.fromTemplate(`
+Ti si asistent turističke agencije. Odgovaraš isključivo na osnovu priloženih izvoda iz cenovnika i programa putovanja.
+
+Pravila:
+- Navodi konkretne podatke: cene sa valutom, datume polaska i povratka, broj noćenja, tip prevoza, šta je uključeno u cenu.
+- Iznose prepiši tačno onako kako stoje u izvorima. Ne zaokružuj, ne preračunavaj i ne procenjuj.
+- Kada navodiš cenu, naznači na koji se aranžman i koji termin odnosi.
+- Ako traženi podatak ne postoji u izvorima, reci to jasno i navedi šta jeste dostupno.
+- Nikada ne izmišljaj cene, termine, hotele ni uslove putovanja.
+- Kada nabrajaš više stavki ili aranžmana, koristi listu.
+- Piši sažeto. Bez marketinškog jezika, bez familijarnog obraćanja, bez emojija.
+
+Izvori:
+{context}
 
 {chat_history}
 
-Korisnik pita: {question}
-
-Odgovori prirodno kao da objašnjavaš prijatelju. Nemoj da kažeš "u tekstu stoji" ili "prema dokumentu" - samo objasni direktno šta znaš. Budi opušten ali informativan. Ako nešto nije jasno, reci "nisam siguran" umesto formalnih fraza.`);
-
-const CASUAL_PROMPT = PromptTemplate.fromTemplate(`
-Kontekst iz dokumenata: {context}
-
-Prethodni razgovor: {chat_history}
-
 Pitanje: {question}
 
-Odgovori casual, kao da pišeš poruku prijatelju. Koristi "e", "pa", "znači", "vidi ovako" - prirodno. Nemoj suvoparne formalnosti.`);
+Odgovor:`);
 
-const FRIENDLY_EXPERT_PROMPT = PromptTemplate.fromTemplate(`
-Informacije koje imam: {context}
+// ---------------------------------------------------------------------------
+// Modeli
+// ---------------------------------------------------------------------------
 
-Šta smo do sad pričali: {chat_history}
+/** Niska temperatura — za faktografske odgovore je kreativnost mana. */
+const answerLLM = new ChatGoogleGenerativeAI({
+  apiKey: GEMINI_API_KEY,
+  model: CHAT_MODEL,
+  temperature: 0.1,
+  maxRetries: 2,
+  maxOutputTokens: 4096,
+});
 
-Ti pitaš: {question}
-
-Objasni kao pametan drug koji zna materiju. Koristi primere, analogije. Umesto "dokumentacija navodi" reci "evo kako to funkcioniše" ili "fora je u tome što".`);
-
-const PERSONAL_ASSISTANT_PROMPT = PromptTemplate.fromTemplate(`
-Ono što znam o ovome: {context}
-
-Naš razgovor: {chat_history}
-
-Tvoje pitanje: {question}
-
-Odgovori kao lični asistent koji stvarno želi da pomogne. Budi direktan, precizan, ali topao u komunikaciji. Ako možeš, dodaj savete ili preporuke.`);
+const condenseLLM = new ChatGoogleGenerativeAI({
+  apiKey: GEMINI_API_KEY,
+  model: CHAT_MODEL,
+  temperature: 0,
+  maxRetries: 1,
+  maxOutputTokens: 128,
+});
 
 // ---------------------------------------------------------------------------
 // Formatiranje
 // ---------------------------------------------------------------------------
 
-/**
- * ISPRAVKA: ranije je svaki chunk sečen na 250 karaktera, iako se
- * indeksiraju chunkovi od 800. Modelu je stizalo manje od trećine
- * dohvaćenog konteksta. Sada šaljemo cele chunkove do ukupnog budžeta.
- */
-const formatDocuments = (docs: Document[]): string => {
-  const parts: string[] = [];
-  let total = 0;
-
-  for (const doc of docs) {
-    const content = doc.pageContent.trim();
-    if (!content) continue;
-
-    const source =
-      typeof doc.metadata?.source === 'string'
-        ? `\n[izvor: ${doc.metadata.source}]`
-        : '';
-    const block = content + source;
-
-    if (total + block.length > MAX_CONTEXT_CHARS) break;
-
-    parts.push(block);
-    total += block.length;
+const getFilename = (doc: Document): string => {
+  const meta = doc.metadata ?? {};
+  if (typeof meta.filename === 'string') return meta.filename;
+  if (typeof meta.source === 'string') {
+    return meta.source.split(/[\\/]/).pop() ?? 'nepoznat izvor';
   }
-
-  return parts.join('\n\n---\n\n');
+  return 'nepoznat izvor';
 };
 
-/**
- * ISPRAVKA: ranije je svaka poruka sečena na 80 karaktera, što je
- * istoriju činilo neupotrebljivom ("Ti: Koje ponude imate za Grčk...").
- */
+/** Čitljiv naziv aranžmana iz imena fajla. */
+const toLabel = (filename: string): string =>
+  filename
+    .replace(/\.pdf$/i, '')
+    .replace(/\s*\(kliknuti za prikaz\)\s*/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
 const formatChatHistory = (chatHistory: [string, string][]): string => {
   if (!chatHistory?.length) return '';
 
-  return chatHistory
+  const turns = chatHistory
     .slice(-HISTORY_TURNS)
     .map(
       ([human, ai]) =>
@@ -112,107 +127,94 @@ const formatChatHistory = (chatHistory: [string, string][]): string => {
         `Asistent: ${ai.slice(0, MAX_HISTORY_CHARS_PER_TURN)}`,
     )
     .join('\n\n');
+
+  return `Prethodni razgovor:\n${turns}\n`;
+};
+
+/**
+ * Numeriše izvore i uz svaki fragment stavlja naziv aranžmana, pa model
+ * može da veže cenu za konkretan dokument umesto da je navede bez konteksta.
+ */
+const formatDocuments = (
+  docs: Document[],
+): { context: string; sources: SourceRef[] } => {
+  const blocks: string[] = [];
+  const sources: SourceRef[] = [];
+  let total = 0;
+
+  for (const doc of docs) {
+    const content = doc.pageContent.trim();
+    if (!content) continue;
+
+    const filename = getFilename(doc);
+    const label = toLabel(filename);
+    const block = `[${blocks.length + 1}] ${label}\n${content}`;
+
+    if (total + block.length > MAX_CONTEXT_CHARS) break;
+
+    blocks.push(block);
+    sources.push({ label, filename, excerpt: content.slice(0, 600) });
+    total += block.length;
+  }
+
+  return { context: blocks.join('\n\n---\n\n'), sources };
 };
 
 // ---------------------------------------------------------------------------
-// Fabrika lanaca
+// Javni API
 // ---------------------------------------------------------------------------
 
-const createLLM = (temperature: number, maxOutputTokens: number) =>
-  new ChatGoogleGenerativeAI({
-    apiKey: GEMINI_API_KEY,
-    model: CHAT_MODEL,
-    temperature,
-    maxRetries: 2,
-    maxOutputTokens,
+const condenseChain = CONDENSE_PROMPT.pipe(condenseLLM).pipe(new StringOutputParser());
+const answerChain = ANSWER_PROMPT.pipe(answerLLM).pipe(new StringOutputParser());
+
+/** Pretvara follow-up u samostalno pitanje. Bez istorije vraća original. */
+export async function condenseQuestion(
+  question: string,
+  history: [string, string][],
+): Promise<string> {
+  if (!history?.length) return question;
+
+  try {
+    const rewritten = await condenseChain.invoke({
+      question,
+      chat_history: formatChatHistory(history),
+    });
+
+    const cleaned = rewritten.trim().replace(/^["']|["']$/g, '');
+    return cleaned.length > 3 ? cleaned : question;
+  } catch {
+    // Ako preformulisanje padne, nastavljamo sa originalnim pitanjem.
+    return question;
+  }
+}
+
+export async function answerQuestion({
+  question,
+  history = [],
+  retriever,
+}: {
+  question: string;
+  history?: [string, string][];
+  retriever: BaseRetriever;
+}): Promise<AnswerResult> {
+  const standaloneQuestion = await condenseQuestion(question, history);
+
+  const docs = await retriever.invoke(standaloneQuestion);
+  const { context, sources } = formatDocuments(docs);
+
+  if (!context) {
+    return {
+      text: 'U dostupnim cenovnicima nisam pronašao podatke koji odgovaraju ovom pitanju.',
+      sources: [],
+      standaloneQuestion,
+    };
+  }
+
+  const text = await answerChain.invoke({
+    context,
+    chat_history: formatChatHistory(history),
+    question: standaloneQuestion,
   });
 
-/**
- * Ranije su četiri funkcije ponavljale identičnu RunnableSequence.
- * Sada je struktura na jednom mestu, a razlikuju se samo prompt i parametri.
- */
-const createChain = (
-  retriever: BaseRetriever,
-  prompt: PromptTemplate,
-  temperature: number,
-  maxOutputTokens: number,
-) =>
-  RunnableSequence.from([
-    {
-      context: (input: ChainInput) =>
-        retriever.invoke(input.question).then(formatDocuments),
-      question: (input: ChainInput) => input.question,
-      chat_history: (input: ChainInput) =>
-        formatChatHistory(input.chat_history ?? []),
-    },
-    prompt,
-    createLLM(temperature, maxOutputTokens),
-    new StringOutputParser(),
-  ]);
-
-// ---------------------------------------------------------------------------
-// Javni lanci
-// ---------------------------------------------------------------------------
-
-export const makeNaturalChain = (retriever: BaseRetriever) =>
-  createChain(retriever, NATURAL_CONVERSATION_PROMPT, 0.3, 1024);
-
-export const makeCasualChain = (retriever: BaseRetriever) =>
-  createChain(retriever, CASUAL_PROMPT, 0.4, 1024);
-
-export const makeFriendlyExpertChain = (retriever: BaseRetriever) =>
-  createChain(retriever, FRIENDLY_EXPERT_PROMPT, 0.25, 1024);
-
-export const makePersonalAssistantChain = (retriever: BaseRetriever) =>
-  createChain(retriever, PERSONAL_ASSISTANT_PROMPT, 0.2, 1024);
-
-/**
- * Bira prompt na osnovu dužine pitanja.
- * NAPOMENA: detekcija stila živi i u pages/api/chat.ts — duplirana logika
- * koju treba objediniti u fazi #3.
- */
-export const makeAdaptiveChain = (retriever: BaseRetriever) => ({
-  invoke: async (input: ChainInput) => {
-    const isShort = input.question.length < 50;
-    const chain = isShort
-      ? makeCasualChain(retriever)
-      : makeFriendlyExpertChain(retriever);
-
-    return chain.invoke(input);
-  },
-});
-
-/**
- * Razmak između poziva ka modelu.
- * NAPOMENA: modul-scope promenljiva ne radi pouzdano na serverless-u —
- * svaka instanca ima svoju kopiju. Zamena Redis-om je u fazi #4.
- */
-let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 1_500;
-
-export const makeConversationalRateLimitedChain = (retriever: BaseRetriever) => {
-  const chain = makeFriendlyExpertChain(retriever);
-
-  return {
-    invoke: async (input: ChainInput) => {
-      const elapsed = Date.now() - lastRequestTime;
-      if (elapsed < MIN_REQUEST_INTERVAL) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, MIN_REQUEST_INTERVAL - elapsed),
-        );
-      }
-      lastRequestTime = Date.now();
-      return chain.invoke(input);
-    },
-  };
-};
-
-export const makeChain = makeFriendlyExpertChain;
-
-export {
-  makeNaturalChain as makeChainNatural,
-  makeCasualChain as makeChainCasual,
-  makePersonalAssistantChain as makeChainAssistant,
-  makeAdaptiveChain as makeChainAdaptive,
-  makeConversationalRateLimitedChain as makeChainSafe,
-};
+  return { text: text.trim(), sources, standaloneQuestion };
+}
