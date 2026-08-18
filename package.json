@@ -12,7 +12,9 @@
     "type-check": "tsc --noEmit",
     "lint": "eslint --ignore-path .gitignore \"**/*.+(ts|js|tsx)\"",
     "format": "prettier --ignore-path .gitignore \"**/*.+(ts|js|tsx)\" --write",
-    "ingest": "tsx -r dotenv/config scripts/ingest-data.ts"
+    "ingest": "tsx -r dotenv/config scripts/ingest-data.ts",
+    "doctor": "tsx -r dotenv/config scripts/doctor.ts dotenv_config_path=.env.local",
+    "probe": "tsx -r dotenv/config scripts/probe-dim.ts dotenv_config_path=.env.local"
   },
   "dependencies": {
     "@langchain/community": "^0.3.15",
