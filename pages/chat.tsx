@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
+import Image from 'next/image';
+import { ArrowUp, Square } from 'lucide-react';
 
 import { fontVariables } from '@/utils/fonts';
 import { useChat } from '@/hooks/useChat';
@@ -13,6 +15,7 @@ const PREDLOZI = [
   'Koje ponude imate za Rim za prvi maj',
   'Šta je uključeno u cenu za Istanbul',
   'Aranžmani sa četiri noćenja',
+  'Polasci avionom u maju',
 ];
 
 export default function ChatPage() {
@@ -26,7 +29,6 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const seededRef = useRef(false);
 
-  /** Pitanje iz URL-a se šalje automatski, tačno jednom. */
   useEffect(() => {
     if (!router.isReady || seededRef.current) return;
 
@@ -52,7 +54,6 @@ export default function ChatPage() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  /** Auto-resize do 200px, pa scroll. */
   const resizeTextarea = () => {
     const el = textareaRef.current;
     if (!el) return;
@@ -82,18 +83,19 @@ export default function ChatPage() {
       <Head>
         <title>TurBot — chat</title>
         <meta name="robots" content="noindex" />
+        <meta name="theme-color" content="#080E15" />
       </Head>
 
       <div
-        className={`${fontVariables} flex min-h-screen flex-col bg-paper font-sans text-ink antialiased`}
+        className={`${fontVariables} flex min-h-svh flex-col bg-ink-deep font-sans text-paper antialiased`}
       >
-        <header className="sticky top-0 z-10 border-b border-paper-line bg-paper/90 backdrop-blur">
+        <header className="sticky top-0 z-10 border-b border-ink-line/70 bg-ink-deep/85 backdrop-blur">
           <div className="mx-auto flex max-w-thread items-center justify-between px-5 py-3">
             <Link
               href="/"
-              className="font-display text-base font-medium tracking-tight text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
+              className="font-display text-base font-medium tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
             >
-              Tur<span className="text-amber-dim">Bot</span>
+              Tur<span className="text-amber">Bot</span>
             </Link>
 
             {messages.length > 0 && (
@@ -104,7 +106,7 @@ export default function ChatPage() {
                   setDraft('');
                   void router.replace('/chat', undefined, { shallow: true });
                 }}
-                className="rounded-md border border-paper-line px-3 py-1.5 font-mono text-xs text-mute transition-colors hover:border-mute-light hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
+                className="rounded-md border border-ink-line px-3 py-1.5 font-mono text-xs text-mute transition-colors hover:border-mute hover:text-paper focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
               >
                 nova pretraga
               </button>
@@ -114,20 +116,29 @@ export default function ChatPage() {
 
         <main className="mx-auto w-full max-w-thread flex-1 px-5 py-8">
           {isEmpty ? (
-            <div className="pt-10">
-              <h1 className="font-display text-2xl font-medium tracking-tight">
+            <div className="flex flex-col items-center pt-10 text-center">
+              <Image
+                src="/robot-full.png"
+                alt=""
+                width={320}
+                height={320}
+                className="h-36 w-auto opacity-90"
+                priority
+              />
+              <h1 className="mt-5 font-display text-2xl font-medium tracking-tight">
                 Šta te zanima iz cenovnika?
               </h1>
-              <p className="mt-2 leading-relaxed text-mute">
+              <p className="mt-2 max-w-sm leading-relaxed text-mute-light">
                 Cene, termini, brojevi letova i šta je uključeno. Svaki odgovor nosi izvor.
               </p>
-              <div className="mt-6 flex flex-col items-start gap-2">
+
+              <div className="mt-7 grid w-full gap-2 sm:grid-cols-2">
                 {PREDLOZI.map((predlog) => (
                   <button
                     key={predlog}
                     type="button"
                     onClick={() => void send(predlog)}
-                    className="rounded-lg border border-paper-line bg-paper-card px-3.5 py-2 text-left text-sm text-mute transition-colors hover:border-teal hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
+                    className="rounded-xl border border-ink-line bg-ink-soft px-4 py-3 text-left text-sm text-mute-light transition-colors hover:border-teal hover:text-paper focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
                   >
                     {predlog}
                   </button>
@@ -141,14 +152,13 @@ export default function ChatPage() {
           {error && (
             <div
               role="alert"
-              className="mt-6 flex items-start justify-between gap-3 rounded-lg border border-amber/40 bg-amber/10 px-4 py-3"
+              className="mt-6 flex items-start justify-between gap-3 rounded-lg border border-amber/35 bg-amber/10 px-4 py-3"
             >
-              <p className="text-sm text-ink">{error}</p>
+              <p className="text-sm text-paper">{error}</p>
               <button
                 type="button"
                 onClick={clearError}
-                aria-label="Zatvori"
-                className="font-mono text-xs text-mute hover:text-ink"
+                className="shrink-0 font-mono text-xs text-mute transition-colors hover:text-paper"
               >
                 zatvori
               </button>
@@ -164,12 +174,12 @@ export default function ChatPage() {
           <div ref={bottomRef} className="h-2" />
         </main>
 
-        <div className="sticky bottom-0 border-t border-paper-line bg-paper/90 backdrop-blur">
-          <div className="mx-auto max-w-thread px-5 py-4">
+        <div className="sticky bottom-0 bg-ink-deep/85 backdrop-blur">
+          <div className="mx-auto max-w-thread px-5 pb-5 pt-2">
             <label htmlFor="composer" className="sr-only">
               Vaše pitanje
             </label>
-            <div className="flex items-end gap-2 rounded-xl border border-paper-line bg-paper-card p-1.5 transition-colors focus-within:border-teal">
+            <div className="flex items-end gap-2 rounded-2xl border border-ink-line bg-ink-soft p-2 transition-colors focus-within:border-mute">
               <textarea
                 id="composer"
                 ref={textareaRef}
@@ -182,31 +192,33 @@ export default function ChatPage() {
                 }}
                 onKeyDown={onKeyDown}
                 placeholder="Postavi pitanje o aranžmanima"
-                className="min-w-0 flex-1 resize-none bg-transparent px-3 py-2 leading-relaxed placeholder:text-mute-light focus:outline-none"
+                className="min-w-0 flex-1 resize-none bg-transparent px-3 py-2 leading-relaxed placeholder:text-mute focus:outline-none"
               />
 
               {pending ? (
                 <button
                   type="button"
                   onClick={stop}
-                  className="shrink-0 rounded-lg border border-paper-line px-4 py-2 font-mono text-sm text-mute transition-colors hover:text-ink"
+                  aria-label="Prekini"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-ink-line text-mute-light transition-colors hover:text-paper"
                 >
-                  stani
+                  <Square className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={submit}
                   disabled={!draft.trim()}
-                  className="shrink-0 rounded-lg bg-ink px-4 py-2 font-mono text-sm text-paper transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal disabled:opacity-25"
+                  aria-label="Pošalji"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber text-ink transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber disabled:opacity-20"
                 >
-                  pitaj
+                  <ArrowUp className="h-4 w-4" aria-hidden="true" />
                 </button>
               )}
             </div>
 
-            <div className="mt-2 flex items-center justify-between font-mono text-[11px] text-mute-light">
-              <span>enter šalje · shift+enter novi red</span>
+            <div className="mt-2 flex items-center justify-between font-mono text-[11px] text-mute">
+              <span>odgovori dolaze iz cenovnika — proveri izvor</span>
               {draft.length > MAX_LENGTH * 0.8 && (
                 <span>
                   {draft.length}/{MAX_LENGTH}

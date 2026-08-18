@@ -9,30 +9,28 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // Noćno nebo na visini — landing.
         ink: {
+          deep: '#080E15',
           DEFAULT: '#0B1A2A',
-          soft: '#14293D',
-          line: '#1F3A52',
+          soft: '#14212E',
+          raised: '#1B2A3A',
+          line: '#243546',
         },
-        // Hladan papir — chat površina, za dugačke cenovnike.
         paper: {
-          DEFAULT: '#F2F4F6',
-          card: '#FFFFFF',
-          line: '#E2E6EA',
+          DEFAULT: '#E8EDF2',
+          dim: '#C3CDD8',
         },
-        // Amber sa split-flap tablice. Jedini akcent.
         amber: {
           DEFAULT: '#F0A22E',
-          dim: '#B87817',
+          dim: '#C77F16',
         },
         teal: {
-          DEFAULT: '#2E8C8C',
-          dim: '#1F6363',
+          DEFAULT: '#3AA0A0',
+          dim: '#247070',
         },
         mute: {
-          DEFAULT: '#64748B',
-          light: '#94A3B8',
+          DEFAULT: '#647688',
+          light: '#93A3B4',
         },
       },
       fontFamily: {
@@ -44,7 +42,7 @@ module.exports = {
         eyebrow: '0.18em',
       },
       maxWidth: {
-        thread: '46rem',
+        thread: '48rem',
       },
       keyframes: {
         'fade-up': {
@@ -53,12 +51,12 @@ module.exports = {
         },
         flap: {
           '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.45' },
+          '50%': { opacity: '0.35' },
         },
       },
       animation: {
         'fade-up': 'fade-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both',
-        flap: 'flap 1.6s ease-in-out infinite',
+        flap: 'flap 1.5s ease-in-out infinite',
       },
     },
   },

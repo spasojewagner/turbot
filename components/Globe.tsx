@@ -1,12 +1,6 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
-/**
- * Globus sa lukovima od Beograda do destinacija koje se STVARNO nalaze
- * u indeksiranim cenovnicima. Nije dekoracija — vizualizuje šta bot zna.
- *
- * Ako dodaš PDF-ove, dopuni ovu listu da se poklopi sa korpusom.
- */
 const ORIGIN = { lat: 44.79, lon: 20.45 };
 
 export const DESTINATIONS = [
@@ -26,18 +20,11 @@ export const DESTINATIONS = [
 ];
 
 const RADIUS = 1;
-const COLOR_GRID = 0x1f3a52;
-const COLOR_CORE = 0x0b1a2a;
 const COLOR_AMBER = 0xf0a22e;
-const COLOR_TEAL = 0x2e8c8c;
+const COLOR_TEAL = 0x3aa0a0;
 
-/**
- * Početna rotacija dovodi Beograd u centar kadra.
- * Izračunato iz latLonToVector3(44.79, 20.45): tačka pada na +x/-z, pa je
- * potrebna rotacija oko Y da dođe na +z, prema kameri.
- */
 const INITIAL_YAW = 1.93;
-const INITIAL_PITCH = 0.3;
+const INITIAL_PITCH = 0.28;
 
 function latLonToVector3(lat: number, lon: number, radius = RADIUS): THREE.Vector3 {
   const phi = (90 - lat) * (Math.PI / 180);
@@ -52,8 +39,8 @@ function latLonToVector3(lat: number, lon: number, radius = RADIUS): THREE.Vecto
 
 function buildArc(from: THREE.Vector3, to: THREE.Vector3): THREE.CatmullRomCurve3 {
   const distance = from.distanceTo(to);
-  const peak = 1 + distance * 0.4;
-  const shoulder = 1 + distance * 0.2;
+  const peak = 1 + distance * 0.36;
+  const shoulder = 1 + distance * 0.18;
 
   const mid = from.clone().add(to).normalize().multiplyScalar(RADIUS * peak);
   const q1 = from.clone().lerp(mid, 0.5).normalize().multiplyScalar(RADIUS * shoulder);
@@ -61,6 +48,24 @@ function buildArc(from: THREE.Vector3, to: THREE.Vector3): THREE.CatmullRomCurve
 
   return new THREE.CatmullRomCurve3([from, q1, mid, q2, to]);
 }
+
+/**
+ * Atmosferski oreol. Fresnel efekat — sjaj je najjači tamo gde je površina
+ * najkosija u odnosu na kameru, dakle po obodu planete.
+ */
+const ATMOSPHERE_VERTEX = `
+varying vec3 vNormal;
+void main() {
+  vNormal = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const ATMOSPHERE_FRAGMENT = `
+varying vec3 vNormal;
+void main() {
+  float intensity = pow(0.62 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.4);
+  gl_FragColor = vec4(0.30, 0.58, 0.78, 1.0) * intensity;
+}`;
 
 interface Route {
   arc: THREE.LineBasicMaterial;
@@ -76,7 +81,6 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
   const routesRef = useRef<Route[]>([]);
   const activeRef = useRef<number | null>(null);
 
-  /** Hover u listi destinacija osvetljava odgovarajući luk. */
   useEffect(() => {
     activeRef.current = activeIndex;
 
@@ -85,10 +89,10 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
       const isDimmed = activeIndex !== null && !isActive;
 
       route.arc.color.setHex(isActive ? COLOR_AMBER : COLOR_TEAL);
-      route.arc.opacity = isActive ? 1 : isDimmed ? 0.12 : 0.5;
+      route.arc.opacity = isActive ? 1 : isDimmed ? 0.1 : 0.55;
       route.dot.color.setHex(isActive ? COLOR_AMBER : COLOR_TEAL);
-      route.dot.opacity = isDimmed ? 0.2 : 1;
-      route.dotMesh.scale.setScalar(isActive ? 1.9 : 1);
+      route.dot.opacity = isDimmed ? 0.15 : 1;
+      route.dotMesh.scale.setScalar(isActive ? 2 : 1);
       route.traveller.visible = !isDimmed;
     });
   }, [activeIndex]);
@@ -101,7 +105,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
-    camera.position.set(0, 0, 3.6);
+    camera.position.set(0, 0, 3.5);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -111,33 +115,43 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
     world.rotation.set(INITIAL_PITCH, INITIAL_YAW, 0);
     scene.add(world);
 
-    world.add(
-      new THREE.Mesh(
-        new THREE.SphereGeometry(RADIUS, 44, 30),
-        new THREE.MeshBasicMaterial({
-          color: COLOR_GRID,
-          wireframe: true,
-          transparent: true,
-          opacity: 0.3,
-        }),
-      ),
-    );
+    // Tekstura se učitava asinhrono; do tada je planeta tamna silueta.
+    const texture = new THREE.TextureLoader().load('/textures/earth-4k.jpg');
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-    // Puna unutrašnja sfera — bez nje lukovi sa druge strane prosijavaju.
-    world.add(
-      new THREE.Mesh(
-        new THREE.SphereGeometry(RADIUS * 0.99, 44, 30),
-        new THREE.MeshBasicMaterial({ color: COLOR_CORE }),
-      ),
+    const earth = new THREE.Mesh(
+      new THREE.SphereGeometry(RADIUS, 64, 48),
+      new THREE.MeshPhongMaterial({ map: texture, shininess: 6, specular: 0x1a2a3a }),
     );
+    world.add(earth);
+
+    // Atmosfera stoji van rotirajuće grupe — oreol ne treba da se vrti.
+    const atmosphere = new THREE.Mesh(
+      new THREE.SphereGeometry(RADIUS * 1.16, 64, 48),
+      new THREE.ShaderMaterial({
+        vertexShader: ATMOSPHERE_VERTEX,
+        fragmentShader: ATMOSPHERE_FRAGMENT,
+        blending: THREE.AdditiveBlending,
+        side: THREE.BackSide,
+        transparent: true,
+      }),
+    );
+    scene.add(atmosphere);
+
+    // Sunce sa strane daje granicu dana i noći.
+    const sun = new THREE.DirectionalLight(0xfff0dd, 2.6);
+    sun.position.set(-2.5, 1.2, 2.2);
+    scene.add(sun);
+    scene.add(new THREE.AmbientLight(0x2b4058, 1.5));
 
     const originVec = latLonToVector3(ORIGIN.lat, ORIGIN.lon);
 
     const originDot = new THREE.Mesh(
-      new THREE.SphereGeometry(0.024, 14, 14),
+      new THREE.SphereGeometry(0.022, 14, 14),
       new THREE.MeshBasicMaterial({ color: COLOR_AMBER }),
     );
-    originDot.position.copy(originVec);
+    originDot.position.copy(originVec.clone().multiplyScalar(1.005));
     world.add(originDot);
 
     const routes: Route[] = [];
@@ -149,7 +163,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
       const arcMaterial = new THREE.LineBasicMaterial({
         color: COLOR_TEAL,
         transparent: true,
-        opacity: 0.5,
+        opacity: 0.55,
       });
       world.add(
         new THREE.Line(
@@ -162,12 +176,12 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
         color: COLOR_TEAL,
         transparent: true,
       });
-      const dotMesh = new THREE.Mesh(new THREE.SphereGeometry(0.015, 10, 10), dotMaterial);
-      dotMesh.position.copy(destVec);
+      const dotMesh = new THREE.Mesh(new THREE.SphereGeometry(0.014, 10, 10), dotMaterial);
+      dotMesh.position.copy(destVec.clone().multiplyScalar(1.005));
       world.add(dotMesh);
 
       const traveller = new THREE.Mesh(
-        new THREE.SphereGeometry(0.012, 8, 8),
+        new THREE.SphereGeometry(0.011, 8, 8),
         new THREE.MeshBasicMaterial({ color: COLOR_AMBER }),
       );
       world.add(traveller);
@@ -183,8 +197,6 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
     });
 
     routesRef.current = routes;
-
-    // -----------------------------------------------------------------------
 
     let dragging = false;
     let lastX = 0;
@@ -233,14 +245,13 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
     let frame = 0;
     let running = true;
     const clock = new THREE.Clock();
-    const autoSpin = reducedMotion ? 0 : 0.0006;
+    const autoSpin = reducedMotion ? 0 : 0.0005;
 
     const tick = () => {
       if (!running) return;
       frame = requestAnimationFrame(tick);
 
       if (!dragging) {
-        // Rotacija staje dok je neka destinacija istaknuta.
         world.rotation.y += (activeRef.current === null ? autoSpin : 0) + velocity;
         velocity *= 0.94;
       }
@@ -278,6 +289,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
       window.removeEventListener('pointerup', onPointerUp);
       routesRef.current = [];
 
+      texture.dispose();
       scene.traverse((obj) => {
         if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
           obj.geometry.dispose();
