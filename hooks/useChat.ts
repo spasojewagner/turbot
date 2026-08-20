@@ -4,6 +4,7 @@ export interface Source {
   label: string;
   filename: string;
   excerpt: string;
+  score?: number;
 }
 
 export interface ChatMessage {
@@ -16,10 +17,14 @@ export interface ChatMessage {
 interface ApiResponse {
   text?: string;
   error?: string;
+  intent?: string;
   retryAfter?: number;
   sourceDocuments?: { pageContent: string; metadata?: Record<string, unknown> }[];
   debug?: Record<string, unknown>;
 }
+
+/** Koliko razmena šaljemo serveru. Starije server sam sažima. */
+const MAX_HISTORY_TURNS = 12;
 
 const newId = () => Math.random().toString(36).slice(2, 10);
 
@@ -27,10 +32,9 @@ function toSources(input: ApiResponse['sourceDocuments']): Source[] {
   if (!Array.isArray(input)) return [];
 
   return input.map((doc, i) => ({
-    label:
-      typeof doc.metadata?.label === 'string' ? doc.metadata.label : `Izvor ${i + 1}`,
-    filename:
-      typeof doc.metadata?.filename === 'string' ? doc.metadata.filename : '',
+    label: typeof doc.metadata?.label === 'string' ? doc.metadata.label : `Izvor ${i + 1}`,
+    filename: typeof doc.metadata?.filename === 'string' ? doc.metadata.filename : '',
+    score: typeof doc.metadata?.score === 'number' ? doc.metadata.score : undefined,
     excerpt: doc.pageContent ?? '',
   }));
 }
@@ -40,7 +44,6 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /** Istorija kao parovi [pitanje, odgovor] — format koji API očekuje. */
   const historyRef = useRef<[string, string][]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
@@ -55,8 +58,8 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
   const send = useCallback(
     async (question: string) => {
       const trimmed = question.trim();
-      // Straža protiv dvostrukog slanja: React strict mode montira dvaput,
-      // a auto-slanje iz ?q= parametra bi inače krenulo dva puta.
+      // Straža protiv dvostrukog slanja: strict mode montira dvaput, pa bi
+      // auto-slanje iz ?q= parametra inače krenulo dva puta.
       if (!trimmed || pendingRef.current) return;
 
       pendingRef.current = true;
@@ -83,11 +86,19 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
         }
 
         const text = data.text ?? '';
-        historyRef.current = [...historyRef.current, [trimmed, text]].slice(-6);
+
+        // Eksplicitna anotacija — bez nje TypeScript vidi string[], ne tuple.
+        const turn: [string, string] = [trimmed, text];
+        historyRef.current = [...historyRef.current, turn].slice(-MAX_HISTORY_TURNS);
 
         setMessages((prev) => [
           ...prev,
-          { id: newId(), role: 'assistant', text, sources: toSources(data.sourceDocuments) },
+          {
+            id: newId(),
+            role: 'assistant',
+            text,
+            sources: toSources(data.sourceDocuments),
+          },
         ]);
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;

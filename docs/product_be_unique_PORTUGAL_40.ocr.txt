@@ -1,0 +1,42 @@
+Evo strukturiranih podataka izvučenih iz cenovnika i programa putovanja:
+
+1. **NAZIV ARANŽMANA, BROJ DANA I NOĆENJA, TIP PREVOZA**
+   * **Naziv aranžmana:** Zemlja duginih boja PORTUGAL
+   * **Broj dana i noćenja:** 5 dana (4 noćenja)
+   * **Tip prevoza:** Avion
+
+2. **TERMINI I CENE**
+   * **Hotel:** Smeštaj u hotelima (tačni nazivi nisu navedeni u programu)
+   * **Kategorija:** 3*
+   * **Termin:** 21.11.2025 – 25.11.2025.
+   * **Tip sobe:** Dvokrevetna soba (ili dvokrevetna soba sa pomoćnim ležajem)
+   * **Cena po osobi:** 799 €
+
+3. **UKLJUČENO U CENU**
+   * Avionski prevoz na relaciji Beograd – Porto / Lisabon – Beograd
+   * Avionske i aerodromske takse u Beogradu, Lisabonu i Portu
+   * Prevoz autobusom na naznačenim relacijama prema programu
+   * Smeštaj u hotelima kategorije 3* u dvokrevetnim ili dvokrevetnim sobama sa pomoćnim ležajem na bazi noćenja sa doručkom (samoposluživanje)
+   * Razgledanje gradova prema programu
+   * Usluge vodiča
+   * Troškovi organizovanja putovanja
+
+4. **NIJE UKLJUČENO U CENU**
+   * Komunalne servisne i porese takse (5 € po osobi i po noćenju)
+   * Međunarodno putno zdravstveno osiguranje
+   * Ulaznice za kulturno-istorijske objekte
+   * Fakultativni izleti
+
+5. **DOPLATE I POPUSTI**
+   * **Doplata za jednokrevetnu sobu:** 200 € za sve vreme boravka (na upit)
+
+6. **FAKULTATIVNI IZLETI**
+   * **Sintra, Kabo de Roka, Kaskais, Estoril** (celodnevni izlet, uključuje prevoz autobusom, ulaznicu za Nacionalnu palatu i vodiča) – **89 €**
+   * **Gimaraeš i Braga** (celodnevni izlet, uključuje prevoz autobusom, ulaznicu za palatu i vodiča) – **85 €**
+
+7. **NAČIN PLAĆANJA**
+   * Plaćanje je u dinarskoj protivvrednosti po srednjem kursu NBS na dan uplate.
+   * **Gotovinski:** 40% akontacija pri prijavi, preostalih 60% najkasnije 30 dana pre polaska.
+   * **Čekovima građana:** 40% pri prijavi, 30% najkasnije 20 dana pre polaska, a preostalih 30% na 6 jednakih mesečnih rata (deponovanjem čekova najkasnije 20 dana pre polaska).
+   * **Platnim karticama:** Banca Intesa na 6 rata bez kamate.
+   * **Kreditima poslovnih banaka.**

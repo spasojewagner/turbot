@@ -3,7 +3,7 @@ import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { PineconeStore } from '@langchain/pinecone';
 import { Pinecone } from '@pinecone-database/pinecone';
 
-import { answerQuestion, CHAT_MODEL } from '@/utils/makechain';
+import { answerQuestion, CHAT_MODEL, type SearchFn } from '@/utils/makechain';
 import { PINECONE_NAME_SPACE } from '@/config/pinecone';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
@@ -12,16 +12,9 @@ const PINECONE_INDEX_NAME_OVERRIDE = process.env.PINECONE_INDEX_NAME!;
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? 'gemini-embedding-001';
 
 const MAX_QUESTION_LENGTH = 600;
-
-/**
- * Broj fragmenata koji ide modelu.
- *
- * Ranije je bilo 2–4, što je bilo premalo za cenovnike: tabela sa cenama
- * i opis aranžmana često završe u različitim fragmentima, pa je model
- * dobijao opis bez brojeva. Osam daje dovoljno pokrivenosti, a i dalje
- * staje u budžet konteksta.
- */
 const RETRIEVAL_K = Number(process.env.RETRIEVAL_K ?? 8);
+/** Koliko razmena istorije prihvatamo od klijenta. Starije server sažima. */
+const MAX_HISTORY_TURNS = 12;
 
 // ---------------------------------------------------------------------------
 // Keš
@@ -102,7 +95,7 @@ function normalizeHistory(input: unknown): [string, string][] {
         typeof pair[0] === 'string' &&
         typeof pair[1] === 'string',
     )
-    .slice(-3);
+    .slice(-MAX_HISTORY_TURNS);
 }
 
 async function getVectorStore(): Promise<PineconeStore> {
@@ -165,17 +158,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const vectorStore = await getVectorStore();
-    const retriever = vectorStore.asRetriever({
-      k: RETRIEVAL_K,
-      searchType: 'similarity',
-    });
+
+    /**
+     * Skorovi su potrebni da bi se odbacili nerelevantni rezultati, pa se
+     * koristi similaritySearchWithScore umesto običnog retrievera.
+     */
+    const search: SearchFn = (query, k) => vectorStore.similaritySearchWithScore(query, k);
 
     const startTime = Date.now();
 
-    const { text, sources, standaloneQuestion } = await answerQuestion({
+    const { text, sources, intent, standaloneQuestion, topScore } = await answerQuestion({
       question: sanitizedQuestion,
       history: chatHistory,
-      retriever,
+      search,
+      k: RETRIEVAL_K,
     });
 
     const responseTime = Date.now() - startTime;
@@ -183,10 +179,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(200).json({
       text,
       question: sanitizedQuestion,
-      // Klijent prikazuje izvore u accordion sekciji ispod odgovora.
+      intent,
       sourceDocuments: sources.map((source) => ({
         pageContent: source.excerpt,
-        metadata: { label: source.label, filename: source.filename },
+        metadata: {
+          label: source.label,
+          filename: source.filename,
+          score: Number(source.score.toFixed(3)),
+        },
       })),
       debug: debug
         ? {
@@ -195,9 +195,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             index: PINECONE_INDEX_NAME_OVERRIDE,
             k: RETRIEVAL_K,
             responseTime: `${responseTime}ms`,
-            sourcesUsed: sources.length,
-            requestsRemaining: rateLimit.remaining,
+            intent,
             standaloneQuestion,
+            topScore,
+            sourcesKept: sources.length,
+            historyTurns: chatHistory.length,
+            requestsRemaining: rateLimit.remaining,
           }
         : undefined,
     });
