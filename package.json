@@ -14,7 +14,8 @@
     "format": "prettier --ignore-path .gitignore \"**/*.+(ts|js|tsx)\" --write",
     "ingest": "tsx -r dotenv/config scripts/ingest-data.ts dotenv_config_path=.env.local",
     "doctor": "tsx -r dotenv/config scripts/doctor.ts dotenv_config_path=.env.local",
-    "probe": "tsx -r dotenv/config scripts/probe-dim.ts dotenv_config_path=.env.local"
+    "probe": "tsx -r dotenv/config scripts/probe-dim.ts dotenv_config_path=.env.local",
+    "pdf-doctor": "tsx scripts/pdf-doctor.ts"
   },
   "dependencies": {
     "@langchain/community": "^0.3.15",
