@@ -1,0 +1,44 @@
+Evo strukturiranih podataka iz cenovnika:
+
+**1. NAZIV ARANŽMANA, BROJ DANA I NOĆENJA, TIP PREVOZA**
+* **Naziv aranžmana:** Andaluzijska bajka MALAGA - TOREMOLINOS
+* **Broj dana i noćenja:** 6 dana (5 noćenja)
+* **Tip prevoza:** Avionom
+
+**2. TERMINI I CENE**
+* **Naziv hotela:** Hotel apartmanskog tipa (smeštaj opremljen čajnom kuhinjom)
+* **Kategorija:** 4*
+* **Termin:** 21.10.2025. – 26.10.2025.
+* **Tip sobe:** Dvokrevetna soba / studio
+* **Cena po osobi:** 799 €
+
+**3. UKLJUČENO U CENU**
+* Avio i aerodromske takse u Beogradu i Malagi
+* Avio prevoz na relaciji Beograd – Malaga – Beograd
+* Prevoz autobusom ili mini busom na naznačenim relacijama
+* Smeštaj u hotelu apartmanskog tipa kategorije 4* u dvokrevetnim sobama sa opremljenom čajnom kuhinjom (usluga noćenja)
+* Razgledanje grada prema programu
+* Usluge vodiča
+* Troškovi organizovanja putovanja
+
+**4. NIJE UKLJUČENO U CENU**
+* Međunarodno putno zdravstveno osiguranje
+* Ulaznice za kulturno-istorijske objekte sa uključenim obaveznim lokalnim vodičem i troškovima rezervacije karata
+* Komunalne servisne i poreske takse (oko 3 € po osobi i po noćenju)
+* Fakultativni izleti
+
+**5. DOPLATE I POPUSTI**
+* **Doplata za jednokrevetnu sobu:** 120 € za sve vreme boravka (uz pravovremeni upit).
+* **Mogućnost smeštaja treće odrasle osobe:** Na pomoćnom ležaju u dvokrevetnim sobama/studijima (uz pravovremeni upit).
+
+**6. FAKULTATIVNI IZLETI**
+* **Celodnevni izlet autobusom „Sevilja”:** 80 € (obuhvata prevoz autobusom, usluge vodiča i troškove organizacije)
+* **Celodnevni izlet autobusom „Granada”:** 75 € (obuhvata prevoz autobusom, usluge vodiča i troškove organizacije; ne obuhvata ulaznicu za Alhambru)
+* **Celodnevni izlet autobusom „Kordoba-Ronda”:** 85 € (obuhvata prevoz autobusom, usluge vodiča i troškove organizacije)
+
+**7. NAČIN PLAĆANJA**
+* Plaćanje je u dinarskoj protivvrednosti po srednjem kursu NBS na dan uplate.
+* **Gotovinski:** 40% avans pri rezervaciji, a preostalih 60% najkasnije 30 dana pre polaska.
+* **Kreditne kartice:** Banca Intesa na 6 rata bez kamate.
+* **Čekovi građana:** 40% pri prijavi, 30% najkasnije 30 dana pre polaska, a preostalih 30% u 6 jednakih mesečnih rata (deponovanjem čekova najkasnije 30 dana pre polaska).
+* **Krediti poslovnih banaka.**

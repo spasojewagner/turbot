@@ -15,9 +15,11 @@
     "ingest": "tsx -r dotenv/config scripts/ingest-data.ts dotenv_config_path=.env.local",
     "doctor": "tsx -r dotenv/config scripts/doctor.ts dotenv_config_path=.env.local",
     "probe": "tsx -r dotenv/config scripts/probe-dim.ts dotenv_config_path=.env.local",
-    "pdf-doctor": "tsx scripts/pdf-doctor.ts"
+    "pdf-doctor": "tsx scripts/pdf-doctor.ts",
+    "ocr": "tsx -r dotenv/config scripts/ocr-scanned.ts dotenv_config_path=.env.local"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@langchain/community": "^0.3.15",
     "@langchain/core": "^0.3.15",
     "@langchain/google-genai": "^0.2.13",
