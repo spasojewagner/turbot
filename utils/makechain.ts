@@ -7,7 +7,9 @@ import {
   diversify,
   formatDocuments,
   parseRouterResponse,
+  quickRoute,
   renderTurns,
+  perDocumentLimit,
   type Intent,
   type SourceRef,
 } from '@/lib/rag/format';
@@ -18,39 +20,29 @@ export type { Intent, SourceRef };
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 
 export const CHAT_MODEL = process.env.CHAT_MODEL ?? 'gemini-3.6-flash';
-
-/**
- * Poseban, brži model za rutiranje i sažimanje.
- *
- * Ta dva poziva ne traže kvalitet glavnog modela, a sa njim su dodavala po
- * dvadesetak sekundi po zahtevu.
- */
-export const UTILITY_MODEL = process.env.UTILITY_MODEL ?? 'gemini-3.1-flash-lite';
+export const UTILITY_MODEL =
+  process.env.UTILITY_MODEL ?? 'gemini-3.1-flash-lite';
 
 const MAX_CONTEXT_CHARS = 14_000;
-/** Koliko poslednjih razmena ide doslovno. Starije se sažimaju. */
 const VERBATIM_TURNS = 5;
 const MAX_TURN_CHARS = 700;
-/** Najviše fragmenata iz istog dokumenta. */
 const MAX_PER_DOCUMENT = 2;
-
-/**
- * Prag kosinusne sličnosti. Gemini embeddinzi retko padnu ispod 0.6 čak i za
- * slabo povezan tekst — na ovom korpusu dobri pogoci su 0.73–0.78. Menjaj tek
- * kad vidiš stvarne skorove u debug izlazu.
- */
 const RELEVANCE_FLOOR = Number(process.env.RELEVANCE_FLOOR ?? 0.62);
 
-export type SearchFn = (query: string, k: number) => Promise<[Document, number][]>;
+export type SearchFn = (
+  query: string,
+  k: number,
+) => Promise<[Document, number][]>;
 
-export interface AnswerResult {
-  text: string;
-  sources: SourceRef[];
-  intent: Intent;
-  standaloneQuestion: string;
-  topScore: number | null;
-  timings: Record<string, number>;
-}
+/** Faza obrade — klijent je prikazuje dok čeka prvi token. */
+export type Stage = 'razumevanje' | 'pretraga' | 'sastavljanje';
+
+export type StreamEvent =
+  | { type: 'status'; stage: Stage }
+  | { type: 'sources'; sources: SourceRef[] }
+  | { type: 'token'; text: string }
+  | { type: 'done'; debug: Record<string, unknown> }
+  | { type: 'error'; message: string };
 
 // ---------------------------------------------------------------------------
 // Promptovi
@@ -119,10 +111,6 @@ Sažetak:`);
 
 // ---------------------------------------------------------------------------
 // Modeli
-//
-// Budžeti tokena su namerno velikodušni: Gemini 3.x troši deo izlaza na
-// interno rezonovanje pre nego što išta ispiše. Sa 300 tokena odgovor je
-// stizao prekinut usred rečenice.
 // ---------------------------------------------------------------------------
 
 const answerLLM = new ChatGoogleGenerativeAI({
@@ -130,7 +118,7 @@ const answerLLM = new ChatGoogleGenerativeAI({
   model: CHAT_MODEL,
   temperature: 0.1,
   maxRetries: 2,
-  maxOutputTokens: 4096,
+  maxOutputTokens: 8192,
 });
 
 const asideLLM = new ChatGoogleGenerativeAI({
@@ -149,19 +137,21 @@ const utilityLLM = new ChatGoogleGenerativeAI({
   maxOutputTokens: 2048,
 });
 
-const routerChain = ROUTER_PROMPT.pipe(utilityLLM).pipe(new StringOutputParser());
-const summaryChain = SUMMARY_PROMPT.pipe(utilityLLM).pipe(new StringOutputParser());
-const answerChain = ANSWER_PROMPT.pipe(answerLLM).pipe(new StringOutputParser());
+const routerChain = ROUTER_PROMPT.pipe(utilityLLM).pipe(
+  new StringOutputParser(),
+);
+const summaryChain = SUMMARY_PROMPT.pipe(utilityLLM).pipe(
+  new StringOutputParser(),
+);
+const answerChain = ANSWER_PROMPT.pipe(answerLLM).pipe(
+  new StringOutputParser(),
+);
 const asideChain = ASIDE_PROMPT.pipe(asideLLM).pipe(new StringOutputParser());
 
 // ---------------------------------------------------------------------------
-// Istorija
+// Istorija i rutiranje
 // ---------------------------------------------------------------------------
 
-/**
- * Poslednjih nekoliko razmena ide doslovno, sve pre toga u sažetak.
- * Bez toga duži razgovor ili preplavi kontekst ili se tiho odseca.
- */
 async function buildHistory(history: [string, string][]): Promise<string> {
   if (!history?.length) return '';
 
@@ -184,21 +174,21 @@ async function buildHistory(history: [string, string][]): Promise<string> {
   return block;
 }
 
-// ---------------------------------------------------------------------------
-// Ruter
-// ---------------------------------------------------------------------------
-
 async function route(
   question: string,
   historyBlock: string,
+  hasHistory: boolean,
 ): Promise<{ intent: Intent; standaloneQuestion: string }> {
+  // Većina stvarnih pitanja se prepoznaje bez poziva modelu.
+  const brzi = quickRoute(question, hasHistory);
+  if (brzi) return { intent: brzi, standaloneQuestion: question };
+
   try {
     const raw = await routerChain.invoke({
       question,
       chat_history: historyBlock || 'Razgovor tek počinje.',
     });
 
-    // Parsiranje je pokriveno testovima i samo pada na siguran default.
     return parseRouterResponse(raw, question);
   } catch (err) {
     console.warn('[router] poziv nije uspeo, koristim cenovnik:', err);
@@ -210,79 +200,139 @@ async function route(
 // Javni API
 // ---------------------------------------------------------------------------
 
-export async function answerQuestion({
+/**
+ * Odgovara na pitanje i emituje događaje kako obrada odmiče.
+ *
+ * Streaming je ovde više od kozmetike: ruter i pretraga zajedno traju
+ * nekoliko sekundi pre nego što model počne da piše, pa bi bez statusa
+ * korisnik gledao u prazno. Ovako vidi u kojoj je fazi, a odgovor se
+ * ispisuje dok nastaje.
+ */
+export async function* streamAnswer({
   question,
   history = [],
   search,
   k = 12,
+  signal,
 }: {
   question: string;
   history?: [string, string][];
   search: SearchFn;
   k?: number;
-}): Promise<AnswerResult> {
+  signal?: AbortSignal;
+}): AsyncGenerator<StreamEvent> {
   const timings: Record<string, number> = {};
-
-  const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
-    const start = Date.now();
-    const result = await fn();
-    timings[name] = Date.now() - start;
-    return result;
+  const started = Date.now();
+  const mark = (name: string, from: number) => {
+    timings[name] = Date.now() - from;
   };
 
-  const historyBlock = await mark('history', () => buildHistory(history));
-  const { intent, standaloneQuestion } = await mark('router', () =>
-    route(question, historyBlock),
-  );
+  try {
+    yield { type: 'status', stage: 'razumevanje' };
 
-  // Ćaskanje i pitanja van teme ne diraju vektorsku bazu.
-  if (intent === 'razgovor' || intent === 'van_teme') {
-    const text = await mark('aside', () =>
-      asideChain.invoke({ question, chat_history: historyBlock }),
+    const t0 = Date.now();
+    const historyBlock = await buildHistory(history);
+    const { intent, standaloneQuestion } = await route(
+      question,
+      historyBlock,
+      history.length > 0,
     );
 
-    return {
-      text: text.trim(),
-      sources: [],
-      intent,
-      standaloneQuestion: question,
-      topScore: null,
-      timings,
-    };
-  }
+    // Ćaskanje i pitanja van teme ne diraju vektorsku bazu.
+    if (intent === 'razgovor' || intent === 'van_teme') {
+      yield { type: 'status', stage: 'sastavljanje' };
 
-  // Traži se šire nego što se koristi, da bi posle filtriranja po dokumentu
-  // ostalo dovoljno materijala.
-  const scored = await mark('search', () => search(standaloneQuestion, k));
-  const topScore = scored.length > 0 ? scored[0][1] : null;
+      const t1 = Date.now();
+      const asideStream = await asideChain.stream({
+        question,
+        chat_history: historyBlock,
+      });
 
-  const relevant = diversify(
-    scored.filter(([, score]) => score >= RELEVANCE_FLOOR),
-    MAX_PER_DOCUMENT,
-  );
+      for await (const chunk of asideStream) {
+        if (signal?.aborted) return;
+        if (chunk) yield { type: 'token', text: chunk };
+      }
+      mark('answer', t1);
 
-  if (relevant.length === 0) {
-    return {
-      text:
-        'U dostupnim cenovnicima nema podataka o tome. Mogu da pretražim po ' +
-        'destinaciji, terminu polaska, tipu prevoza ili ceni — probaj sa nekim od toga.',
-      sources: [],
-      intent,
-      standaloneQuestion,
-      topScore,
-      timings,
-    };
-  }
+      yield {
+        type: 'done',
+        debug: {
+          intent,
+          standaloneQuestion: question,
+          model: UTILITY_MODEL,
+          timings,
+          total: Date.now() - started,
+        },
+      };
+      return;
+    }
 
-  const { context, sources } = formatDocuments(relevant, MAX_CONTEXT_CHARS);
+    yield { type: 'status', stage: 'pretraga' };
 
-  const text = await mark('answer', () =>
-    answerChain.invoke({
+    const t2 = Date.now();
+    const scored = await search(standaloneQuestion, k);
+    mark('search', t2);
+
+    const topScore = scored.length > 0 ? scored[0][1] : null;
+    const relevant = diversify(
+      scored.filter(([, score]) => score >= RELEVANCE_FLOOR),
+      perDocumentLimit(standaloneQuestion),
+    );
+
+    if (relevant.length === 0) {
+      yield {
+        type: 'token',
+        text:
+          'U dostupnim cenovnicima nema podataka o tome. Mogu da pretražim po ' +
+          'destinaciji, terminu polaska, tipu prevoza ili ceni — probaj sa nekim od toga.',
+      };
+      yield {
+        type: 'done',
+        debug: {
+          intent,
+          standaloneQuestion,
+          topScore,
+          sourcesKept: 0,
+          timings,
+        },
+      };
+      return;
+    }
+
+    const { context, sources } = formatDocuments(relevant, MAX_CONTEXT_CHARS);
+
+    // Izvori idu pre teksta, pa klijent može odmah da ih prikaže.
+    yield { type: 'sources', sources };
+    yield { type: 'status', stage: 'sastavljanje' };
+
+    const t3 = Date.now();
+    const answerStream = await answerChain.stream({
       context,
       chat_history: historyBlock,
       question: standaloneQuestion,
-    }),
-  );
+    });
 
-  return { text: text.trim(), sources, intent, standaloneQuestion, topScore, timings };
+    for await (const chunk of answerStream) {
+      if (signal?.aborted) return;
+      if (chunk) yield { type: 'token', text: chunk };
+    }
+    mark('answer', t3);
+
+    yield {
+      type: 'done',
+      debug: {
+        intent,
+        standaloneQuestion,
+        topScore,
+        sourcesKept: sources.length,
+        model: CHAT_MODEL,
+        timings,
+        total: Date.now() - started,
+      },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[stream] greška:', message);
+    yield { type: 'error', message };
+  }
 }

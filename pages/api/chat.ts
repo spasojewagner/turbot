@@ -3,7 +3,8 @@ import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { PineconeStore } from '@langchain/pinecone';
 import { Pinecone } from '@pinecone-database/pinecone';
 
-import { answerQuestion, CHAT_MODEL, type SearchFn } from '@/utils/makechain';
+import { streamAnswer, type SearchFn, type StreamEvent } from '@/utils/makechain';
+import { normalizeHistory } from '@/lib/rag/format';
 import { PINECONE_NAME_SPACE } from '@/config/pinecone';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
@@ -12,8 +13,7 @@ const PINECONE_INDEX_NAME_OVERRIDE = process.env.PINECONE_INDEX_NAME!;
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? 'gemini-embedding-001';
 
 const MAX_QUESTION_LENGTH = 600;
-const RETRIEVAL_K = Number(process.env.RETRIEVAL_K ?? 8);
-/** Koliko razmena istorije prihvatamo od klijenta. Starije server sažima. */
+const RETRIEVAL_K = Number(process.env.RETRIEVAL_K ?? 12);
 const MAX_HISTORY_TURNS = 12;
 
 // ---------------------------------------------------------------------------
@@ -55,48 +55,21 @@ function checkRateLimit(ip: string) {
 
   if (!bucket || now - bucket.windowStart > WINDOW_SIZE) {
     rateLimitBuckets.set(ip, { count: 1, windowStart: now });
-    return { allowed: true, remaining: MAX_REQUESTS_PER_MINUTE - 1, retryAfter: 0 };
+    return { allowed: true, retryAfter: 0 };
   }
 
   if (bucket.count >= MAX_REQUESTS_PER_MINUTE) {
     return {
       allowed: false,
-      remaining: 0,
       retryAfter: Math.ceil((WINDOW_SIZE - (now - bucket.windowStart)) / 1000),
     };
   }
 
   bucket.count += 1;
-  return {
-    allowed: true,
-    remaining: MAX_REQUESTS_PER_MINUTE - bucket.count,
-    retryAfter: 0,
-  };
+  return { allowed: true, retryAfter: 0 };
 }
 
 // ---------------------------------------------------------------------------
-// Pomoćne funkcije
-// ---------------------------------------------------------------------------
-
-function safeErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return 'Nepoznata greška';
-}
-
-function normalizeHistory(input: unknown): [string, string][] {
-  if (!Array.isArray(input)) return [];
-
-  return input
-    .filter(
-      (pair): pair is [string, string] =>
-        Array.isArray(pair) &&
-        pair.length === 2 &&
-        typeof pair[0] === 'string' &&
-        typeof pair[1] === 'string',
-    )
-    .slice(-MAX_HISTORY_TURNS);
-}
 
 async function getVectorStore(): Promise<PineconeStore> {
   const isStale = Date.now() - lastInitTime > CACHE_DURATION;
@@ -149,97 +122,75 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(429).json({
       error: 'Previše pitanja u kratkom vremenu. Sačekaj minut.',
       retryAfter: rateLimit.retryAfter,
-      friendly: true,
     });
   }
 
   const sanitizedQuestion = question.trim().slice(0, MAX_QUESTION_LENGTH);
-  const chatHistory = normalizeHistory(history);
+  const chatHistory = normalizeHistory(history, MAX_HISTORY_TURNS);
+
+  /**
+   * NDJSON: jedan JSON objekat po redu.
+   *
+   * Prostiji od Server-Sent Events i dovoljan ovde, jer je veza jednosmerna
+   * i traje koliko i jedan odgovor. Klijent deli po prelomu reda i parsira
+   * red po red.
+   */
+  res.writeHead(200, {
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    // Sprečava bafering na obrnutim proksijima poput nginxa.
+    'X-Accel-Buffering': 'no',
+  });
+
+  const send = (event: StreamEvent) => {
+    res.write(`${JSON.stringify(event)}\n`);
+  };
+
+  // Ako korisnik zatvori vezu, prekidamo posao umesto da trošimo kvotu.
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
 
   try {
     const vectorStore = await getVectorStore();
-
-    /**
-     * Skorovi su potrebni da bi se odbacili nerelevantni rezultati, pa se
-     * koristi similaritySearchWithScore umesto običnog retrievera.
-     */
     const search: SearchFn = (query, k) => vectorStore.similaritySearchWithScore(query, k);
 
-    const startTime = Date.now();
-
-    const { text, sources, intent, standaloneQuestion, topScore } = await answerQuestion({
+    for await (const event of streamAnswer({
       question: sanitizedQuestion,
       history: chatHistory,
       search,
       k: RETRIEVAL_K,
-    });
+      signal: controller.signal,
+    })) {
+      if (controller.signal.aborted) break;
 
-    const responseTime = Date.now() - startTime;
+      // Debug podaci se šalju samo kada su traženi.
+      if (event.type === 'done' && !debug) {
+        send({ type: 'done', debug: {} });
+        continue;
+      }
 
-    return res.status(200).json({
-      text,
-      question: sanitizedQuestion,
-      intent,
-      sourceDocuments: sources.map((source) => ({
-        pageContent: source.excerpt,
-        metadata: {
-          label: source.label,
-          filename: source.filename,
-          score: Number(source.score.toFixed(3)),
-        },
-      })),
-      debug: debug
-        ? {
-            chatModel: CHAT_MODEL,
-            embeddingModel: EMBEDDING_MODEL,
-            index: PINECONE_INDEX_NAME_OVERRIDE,
-            k: RETRIEVAL_K,
-            responseTime: `${responseTime}ms`,
-            intent,
-            standaloneQuestion,
-            topScore,
-            sourcesKept: sources.length,
-            historyTurns: chatHistory.length,
-            requestsRemaining: rateLimit.remaining,
-          }
-        : undefined,
-    });
-  } catch (error: unknown) {
-    const message = safeErrorMessage(error);
+      send(event);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     console.error('Greška u chat handleru:', message);
 
-    const status = (error as { status?: number })?.status;
-    const debugPayload = debug ? { error: message.slice(0, 300) } : undefined;
+    const friendly = message.includes('quota')
+      ? 'Dnevna kvota je iskorišćena. Probaj kasnije.'
+      : 'Dogodila se greška. Probaj ponovo za malo.';
 
-    if (status === 429 || message.includes('429') || message.includes('quota')) {
-      res.setHeader('Retry-After', 7200);
-      return res.status(429).json({
-        error: 'Dnevna kvota je iskorišćena. Probaj kasnije.',
-        retryAfter: 7200,
-        friendly: true,
-        debug: debugPayload,
-      });
-    }
-
-    if (message.includes('timeout')) {
-      return res.status(408).json({
-        error: 'Odgovor je predugo trajao. Probaj ponovo.',
-        friendly: true,
-        debug: debugPayload,
-      });
-    }
-
-    return res.status(500).json({
-      error: 'Dogodila se greška. Probaj ponovo za malo.',
-      friendly: false,
-      debug: debugPayload,
-    });
+    send({ type: 'error', message: friendly });
+  } finally {
+    res.end();
   }
 }
 
 export const config = {
   api: {
     bodyParser: { sizeLimit: '1mb' },
+    // Obavezno: bez ovoga Next bafferuje odgovor i streaming ne radi.
+    responseLimit: false,
   },
   runtime: 'nodejs',
   maxDuration: 60,

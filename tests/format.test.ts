@@ -7,6 +7,7 @@ import {
   getFilename,
   normalizeHistory,
   parseRouterResponse,
+  quickRoute,
   renderTurns,
   toLabel,
 } from '@/lib/rag/format';
@@ -165,6 +166,47 @@ describe('formatDocuments', () => {
   it('prenosi skor u izvore', () => {
     const { sources } = formatDocuments([[doc('a.pdf', 'tekst'), 0.77]]);
     expect(sources[0].score).toBe(0.77);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('quickRoute', () => {
+  it('prepoznaje pozdrav bez poziva modelu', () => {
+    expect(quickRoute('Zdravo', false)).toBe('razgovor');
+    expect(quickRoute('hvala ti puno', false)).toBe('razgovor');
+    expect(quickRoute('Dobar dan', true)).toBe('razgovor');
+  });
+
+  it('ne proglašava dugačko pitanje pozdravom', () => {
+    const dugacko = 'Zdravo, zanima me koliko košta aranžman za Rim u maju za dvoje';
+    expect(quickRoute(dugacko, false)).toBe('cenovnik');
+  });
+
+  it('prepoznaje pitanje o cenovniku bez istorije', () => {
+    expect(quickRoute('Koliko košta Rim?', false)).toBe('cenovnik');
+    expect(quickRoute('Koji su termini polaska?', false)).toBe('cenovnik');
+    expect(quickRoute('Ima li slobodnih hotela?', false)).toBe('cenovnik');
+  });
+
+  it('prepoznaje samostalno pitanje i kada postoji istorija', () => {
+    expect(quickRoute('A koliko košta Istanbul?', true)).toBe('cenovnik');
+    expect(quickRoute('Šta imate za Maltu?', true)).toBe('cenovnik');
+  });
+
+  it('prepušta modelu nastavak bez pomenute destinacije', () => {
+    expect(quickRoute('a koliko to košta?', true)).toBeNull();
+    expect(quickRoute('šta je uključeno?', true)).toBeNull();
+  });
+
+  it('prepušta modelu pitanja bez ijednog signala', () => {
+    expect(quickRoute('koliko je 2+2', false)).toBeNull();
+    expect(quickRoute('ko je predsednik Francuske', false)).toBeNull();
+  });
+
+  it('radi bez dijakritike', () => {
+    expect(quickRoute('koliko kosta Rim', false)).toBe('cenovnik');
+    expect(quickRoute('koji su termini za Svajcarsku', false)).toBe('cenovnik');
   });
 });
 

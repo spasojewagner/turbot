@@ -2,12 +2,8 @@ import { useState } from 'react';
 import Image from 'next/image';
 import ReactMarkdown, { type Components } from 'react-markdown';
 
-import type { ChatMessage, Source } from '@/hooks/useChat';
+import type { ChatMessage, Source, Stage } from '@/hooks/useChat';
 
-/**
- * Markdown se stilizuje ručno jer @tailwindcss/typography nije instaliran,
- * a odgovori su gotovo uvek ugnježdene liste sa cenama i datumima.
- */
 const markdown: Components = {
   p: ({ node, ...props }) => <p {...props} className="mb-3 leading-[1.7] last:mb-0" />,
   ul: ({ node, ...props }) => <ul {...props} className="mb-3 space-y-1.5 last:mb-0" />,
@@ -19,12 +15,20 @@ const markdown: Components = {
     />
   ),
   strong: ({ node, ...props }) => <strong {...props} className="font-medium text-paper" />,
-  em: ({ node, ...props }) => <em {...props} className="text-paper-dim not-italic" />,
+  em: ({ node, ...props }) => <em {...props} className="not-italic text-paper-dim" />,
   code: ({ node, ...props }) => (
-    <code {...props} className="rounded bg-ink-raised px-1.5 py-0.5 font-mono text-[0.9em] text-amber" />
+    <code
+      {...props}
+      className="rounded bg-ink-raised px-1.5 py-0.5 font-mono text-[0.9em] text-amber"
+    />
   ),
   a: ({ node, ...props }) => (
-    <a {...props} target="_blank" rel="noopener noreferrer" className="text-teal underline underline-offset-2" />
+    <a
+      {...props}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-teal underline underline-offset-2"
+    />
   ),
   h1: ({ node, ...props }) => <h3 {...props} className="mb-2 font-display font-medium text-paper" />,
   h2: ({ node, ...props }) => <h3 {...props} className="mb-2 font-display font-medium text-paper" />,
@@ -32,10 +36,23 @@ const markdown: Components = {
   hr: () => <hr className="my-4 border-ink-line" />,
 };
 
+const STAGE_LABEL: Record<Stage, string> = {
+  razumevanje: 'razumem pitanje',
+  pretraga: 'pretražujem cenovnike',
+  sastavljanje: 'sastavljam odgovor',
+};
+
 function Avatar() {
   return (
     <div className="mt-0.5 h-8 w-8 shrink-0 overflow-hidden rounded-full bg-ink-raised ring-1 ring-ink-line">
-      <Image src="/robot.png" alt="" width={64} height={64} className="h-full w-full object-cover" priority />
+      <Image
+        src="/robot.png"
+        alt=""
+        width={64}
+        height={64}
+        className="h-full w-full object-cover"
+        priority
+      />
     </div>
   );
 }
@@ -73,6 +90,9 @@ function SourceList({ sources }: { sources: Source[] }) {
         <div className="mt-3 rounded-lg border border-ink-line bg-ink-soft p-3.5">
           <p className="mb-2 break-all font-mono text-[11px] text-mute">
             {sources[open].filename}
+            {typeof sources[open].score === 'number' && (
+              <span className="ml-2 text-teal">{sources[open].score?.toFixed(2)}</span>
+            )}
           </p>
           <p className="whitespace-pre-wrap text-sm leading-relaxed text-mute-light">
             {sources[open].excerpt}
@@ -85,10 +105,10 @@ function SourceList({ sources }: { sources: Source[] }) {
 
 export default function ChatThread({
   messages,
-  pending,
+  stage,
 }: {
   messages: ChatMessage[];
-  pending: boolean;
+  stage: Stage | null;
 }) {
   return (
     <div className="space-y-7">
@@ -100,25 +120,32 @@ export default function ChatThread({
             </p>
           </div>
         ) : (
-          /* Asistent bez bubble-a — strukturirane liste se čitaju punom širinom. */
           <div key={message.id} className="flex gap-3.5">
             <Avatar />
             <div className="min-w-0 flex-1 text-paper-dim">
-              <ReactMarkdown components={markdown}>{message.text}</ReactMarkdown>
-              <SourceList sources={message.sources ?? []} />
+              {message.text ? (
+                <>
+                  <ReactMarkdown components={markdown}>{message.text}</ReactMarkdown>
+                  {/* Kursor stoji dok tekst pristiže. */}
+                  {message.streaming && (
+                    <span
+                      className="ml-0.5 inline-block h-4 w-[2px] animate-flap bg-amber align-middle"
+                      aria-hidden="true"
+                    />
+                  )}
+                </>
+              ) : (
+                /* Pre prvog tokena prikazujemo u kojoj je fazi obrada. */
+                <div className="flex items-center gap-2 pt-1.5 font-mono text-xs text-mute">
+                  <span className="h-1.5 w-1.5 animate-flap rounded-full bg-amber" />
+                  {stage ? STAGE_LABEL[stage] : 'obrađujem'}
+                </div>
+              )}
+
+              {!message.streaming && <SourceList sources={message.sources ?? []} />}
             </div>
           </div>
         ),
-      )}
-
-      {pending && (
-        <div className="flex gap-3.5">
-          <Avatar />
-          <div className="flex items-center gap-2 pt-1.5 font-mono text-xs text-mute">
-            <span className="h-1.5 w-1.5 animate-flap rounded-full bg-amber" />
-            pretražujem cenovnike
-          </div>
-        </div>
       )}
     </div>
   );

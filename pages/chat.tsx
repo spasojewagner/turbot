@@ -23,12 +23,15 @@ export default function ChatPage() {
   const [debug, setDebug] = useState(false);
 
   const router = useRouter();
-  const { messages, pending, error, send, stop, reset, clearError } = useChat({ debug });
+  const { messages, pending, stage, error, send, stop, reset, clearError } = useChat({
+    debug,
+  });
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const seededRef = useRef(false);
 
+  /** Pitanje iz URL-a se šalje automatski, tačno jednom. */
   useEffect(() => {
     if (!router.isReady || seededRef.current) return;
 
@@ -39,9 +42,15 @@ export default function ChatPage() {
     if (question) void send(question);
   }, [router.isReady, router.query.q, send]);
 
+  /**
+   * Skrol prati i dolazak novih poruka i tekst koji pristiže,
+   * pa je zavisnost dužina poslednje poruke, ne samo broj poruka.
+   */
+  const lastLength = messages[messages.length - 1]?.text.length ?? 0;
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages.length, pending]);
+  }, [messages.length, lastLength]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -146,7 +155,7 @@ export default function ChatPage() {
               </div>
             </div>
           ) : (
-            <ChatThread messages={messages} pending={pending} />
+            <ChatThread messages={messages} stage={stage} />
           )}
 
           {error && (
@@ -167,7 +176,7 @@ export default function ChatPage() {
 
           {debug && (
             <p className="mt-6 font-mono text-xs text-mute">
-              debug uključen — pogledaj Network tab za polje debug u odgovoru
+              debug uključen — merenja se ispisuju u konzoli browsera
             </p>
           )}
 

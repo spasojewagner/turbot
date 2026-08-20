@@ -1,11 +1,10 @@
 import { Document } from '@langchain/core/documents';
 
 /**
- * Čiste funkcije izvučene iz `utils/makechain.ts`.
+ * Čiste funkcije RAG sloja.
  *
- * Razlog za izdvajanje je testabilnost: sve ovde je bez mrežnih poziva i bez
- * stanja, pa se pokriva jediničnim testovima bez ijednog poziva ka modelu.
- * Ono što ostaje u makechain-u su promptovi i orkestracija.
+ * Sve ovde je bez mrežnih poziva i bez stanja, pa se pokriva jediničnim
+ * testovima bez ijednog poziva ka modelu.
  */
 
 export type Intent = 'cenovnik' | 'nastavak' | 'razgovor' | 'van_teme';
@@ -18,7 +17,17 @@ export interface SourceRef {
   excerpt: string;
   score: number;
 }
-
+/**
+ * Koliko fragmenata po dokumentu propustiti.
+ *
+ * Pitanje o jednoj destinaciji traži dubinu — tabela sa cenama, termini i
+ * uslovi su u istom fajlu. Široko pitanje traži pokrivenost više cenovnika.
+ * Zato granica zavisi od toga koliko je destinacija pomenuto.
+ */
+export function perDocumentLimit(question: string): number {
+  const pogoci = question.match(DESTINACIJE);
+  return pogoci && pogoci.length <= 1 ? 4 : 2;
+}
 // ---------------------------------------------------------------------------
 // Metapodaci
 // ---------------------------------------------------------------------------
@@ -32,7 +41,6 @@ export function getFilename(doc: Document): string {
   return 'nepoznat izvor';
 }
 
-/** Čitljiv naziv aranžmana iz imena fajla. */
 export function toLabel(filename: string): string {
   return filename
     .replace(/\.pdf$/i, '')
@@ -55,7 +63,6 @@ export function renderTurns(turns: [string, string][], maxChars = 700): string {
     .join('\n\n');
 }
 
-/** Odbacuje sve što ne odgovara obliku [pitanje, odgovor]. */
 export function normalizeHistory(input: unknown, maxTurns = 12): [string, string][] {
   if (!Array.isArray(input)) return [];
 
@@ -74,12 +81,6 @@ export function normalizeHistory(input: unknown, maxTurns = 12): [string, string
 // Rezultati pretrage
 // ---------------------------------------------------------------------------
 
-/**
- * Ograničava broj fragmenata po dokumentu, čuvajući redosled po skoru.
- *
- * Bez ovoga pitanje o jednoj destinaciji vrati osam komada istog PDF-a, pa
- * pitanja tipa "aranžmani do 700 €" nikad ne vide više ponuda odjednom.
- */
 export function diversify(
   scored: [Document, number][],
   maxPerDocument = 2,
@@ -126,12 +127,64 @@ export function formatDocuments(
 }
 
 // ---------------------------------------------------------------------------
-// Ruter
+// Brzi ruter
+// ---------------------------------------------------------------------------
+
+const POZDRAVI =
+  /^(zdravo|ćao|cao|hej|hi|hello|dobar dan|dobro jutro|dobro veče|dobro vece|hvala|pozdrav|važi|vazi|ok|okej|super)\b/i;
+
+/** Reči koje se javljaju u pitanjima o cenovniku. */
+const PUTOVANJE =
+  /\b(cen[aeiu]|košta|kosta|aranžman|aranzman|termin|polaz|povrat|noćenj|nocenj|noći|noci|hotel|smeštaj|smestaj|avion|autobus|let[oa]?v?|putovanj|ponud|doručak|dorucak|doplat|popust|taks|izlet|destinacij|rezervacij|osiguranj|prtljag|transfer|vodič|vodic|apartman|polupansion|pansion)\b/i;
+
+/**
+ * Destinacije koje se javljaju u korpusu.
+ *
+ * Ako pitanje pominje neku od njih, samostalno je — nije nastavak koji traži
+ * razrešavanje zamenica, pa se poziv ruteru može preskočiti.
+ */
+const DESTINACIJE =
+  /\b(rim|istanbul|malta|maroko|lisabon|porto|portugal|amsterdam|peterburg|bari|pulj|kairo|nil[ua]?|andaluzij|malag|škotsk|skotsk|englesk|francusk|pariz|ljubljan|švajcarsk|svajcarsk|ženev|zenev|bern|cirih|barselon|monako|milano|minhen|salcburg|trst|padov|španij|spanij|italij|grčk|grck|tursk|egipat|holandij|rusij|slovenij|koimbr|braga|sintr)\b/i;
+
+/**
+ * Klasifikacija bez poziva modelu, kada je ishod nedvosmislen.
+ *
+ * Ruter je najskuplji deo lanca posle samog odgovora — na free tieru sa
+ * dvadeset zahteva dnevno, dva poziva po pitanju znače sedam pitanja umesto
+ * dvadeset. Ova heuristika hvata većinu stvarnih pitanja.
+ *
+ * Vraća `null` kada nije sigurna, i tada se poziva model.
+ */
+export function quickRoute(question: string, hasHistory: boolean): Intent | null {
+  const q = question.trim();
+
+  // Pozdrav ili zahvala — kratko i prepoznatljivo.
+  if (q.length < 40 && POZDRAVI.test(q)) return 'razgovor';
+
+  const pominjeDestinaciju = DESTINACIJE.test(q);
+  const pominjePutovanje = PUTOVANJE.test(q);
+
+  if (!pominjeDestinaciju && !pominjePutovanje) {
+    // Nema nijednog signala — može biti van teme, može biti nastavak.
+    // Odluku prepuštamo modelu.
+    return null;
+  }
+
+  // Bez istorije nastavak nije moguć.
+  if (!hasHistory) return 'cenovnik';
+
+  // Sa istorijom, ali sa izričito pomenutom destinacijom — pitanje stoji samo.
+  if (pominjeDestinaciju) return 'cenovnik';
+
+  // Ostalo su verovatno nastavci koji traže razrešavanje zamenica.
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Parsiranje odgovora rutera
 // ---------------------------------------------------------------------------
 
 /**
- * Parsira odgovor rutera.
- *
  * Najkrhkiji deo lanca: model ume da obavije JSON u markdown ogradu, doda
  * uvodnu rečenicu, ili vrati nameru koja nije u skupu. Sve to ovde pada na
  * siguran default umesto da ruši zahtev.
