@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, refaktor]
+  pull_request:
+
+# Nov push na istu granu prekida prethodni prolaz umesto da čeka u redu.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provera:
+    name: Provera
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalacija
+        run: npm ci
+
+      - name: Tipovi
+        run: npm run type-check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Testovi
+        run: npm run test:run
+
+      - name: Build
+        # Vrednosti su lažne — build samo proverava da se aplikacija sastavlja.
+        # Pravi ključevi se nikad ne stavljaju u CI za javni repo.
+        env:
+          GEMINI_API_KEY: ci-placeholder
+          PINECONE_API_KEY: ci-placeholder
+          PINECONE_INDEX_NAME: ci-placeholder
+          PINECONE_NAMESPACE: ci-placeholder
+        run: npm run build
+
+      - name: Provera da tajne nisu ušle u kod
+        run: |
+          if git grep -nE "AIzaSy|pcsk_|AQ\.Ab8" -- '*.ts' '*.tsx' '*.js'; then
+            echo "::error::Pronađen API ključ u izvornom kodu"
+            exit 1
+          fi
+          echo "Nema hardkodovanih ključeva."

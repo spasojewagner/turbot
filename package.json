@@ -16,7 +16,9 @@
     "doctor": "tsx -r dotenv/config scripts/doctor.ts dotenv_config_path=.env.local",
     "probe": "tsx -r dotenv/config scripts/probe-dim.ts dotenv_config_path=.env.local",
     "pdf-doctor": "tsx scripts/pdf-doctor.ts",
-    "ocr": "tsx -r dotenv/config scripts/ocr-scanned.ts dotenv_config_path=.env.local"
+    "ocr": "tsx -r dotenv/config scripts/ocr-scanned.ts dotenv_config_path=.env.local",
+    "test": "vitest",
+    "test:run": "vitest run"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -47,6 +49,7 @@
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.185.4",
     "@typescript-eslint/parser": "^8.14.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "autoprefixer": "^10.4.20",
     "eslint": "^8.57.1",
     "eslint-config-next": "^14.2.15",
@@ -54,7 +57,8 @@
     "prettier": "^3.3.3",
     "tailwindcss": "^3.4.14",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=18"

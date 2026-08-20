@@ -3,6 +3,18 @@ import { PromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { Document } from '@langchain/core/documents';
 
+import {
+  diversify,
+  formatDocuments,
+  parseRouterResponse,
+  renderTurns,
+  type Intent,
+  type SourceRef,
+} from '@/lib/rag/format';
+
+// Re-eksport da pages/api/chat.ts ne mora da zna za lib sloj.
+export type { Intent, SourceRef };
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 
 export const CHAT_MODEL = process.env.CHAT_MODEL ?? 'gemini-3.6-flash';
@@ -10,41 +22,26 @@ export const CHAT_MODEL = process.env.CHAT_MODEL ?? 'gemini-3.6-flash';
 /**
  * Poseban, brži model za rutiranje i sažimanje.
  *
- * Ova dva poziva ne traže kvalitet glavnog modela, a sa njim su dodavala
- * po dvadesetak sekundi po zahtevu. Lite varijanta radi isti posao znatno
- * brže.
+ * Ta dva poziva ne traže kvalitet glavnog modela, a sa njim su dodavala po
+ * dvadesetak sekundi po zahtevu.
  */
 export const UTILITY_MODEL = process.env.UTILITY_MODEL ?? 'gemini-3.1-flash-lite';
 
 const MAX_CONTEXT_CHARS = 14_000;
+/** Koliko poslednjih razmena ide doslovno. Starije se sažimaju. */
 const VERBATIM_TURNS = 5;
 const MAX_TURN_CHARS = 700;
-
-/**
- * Najviše fragmenata iz istog dokumenta.
- *
- * Bez ovoga pitanje o jednoj destinaciji vrati osam komada istog PDF-a, pa
- * pitanja tipa "aranžmani do 700 €" nikad ne vide više ponuda odjednom.
- */
+/** Najviše fragmenata iz istog dokumenta. */
 const MAX_PER_DOCUMENT = 2;
 
 /**
- * Prag kosinusne sličnosti. Gemini embeddinzi retko padnu ispod 0.6 čak i
- * za slabo povezan tekst — izmereno na ovom korpusu: dobri pogoci su
- * 0.73–0.78. Vrednost menjaj tek kad vidiš skorove u debug izlazu.
+ * Prag kosinusne sličnosti. Gemini embeddinzi retko padnu ispod 0.6 čak i za
+ * slabo povezan tekst — na ovom korpusu dobri pogoci su 0.73–0.78. Menjaj tek
+ * kad vidiš stvarne skorove u debug izlazu.
  */
 const RELEVANCE_FLOOR = Number(process.env.RELEVANCE_FLOOR ?? 0.62);
 
-export type Intent = 'cenovnik' | 'nastavak' | 'razgovor' | 'van_teme';
-
 export type SearchFn = (query: string, k: number) => Promise<[Document, number][]>;
-
-export interface SourceRef {
-  label: string;
-  filename: string;
-  excerpt: string;
-  score: number;
-}
 
 export interface AnswerResult {
   text: string;
@@ -87,7 +84,7 @@ Pravila:
 - Navodi konkretne podatke: cene sa valutom, datume polaska i povratka, broj noćenja, tip prevoza, šta je uključeno u cenu.
 - Iznose prepiši tačno onako kako stoje u izvorima. Ne zaokružuj, ne preračunavaj i ne procenjuj.
 - Kada navodiš cenu, naznači na koji se aranžman i koji termin odnosi.
-- Ako traženi podatak ne postoji u izvorima, reci to jasno i navedi šta jeste dostupno.
+- Ako traženi podatak ne postoji u izvorima, reci to jasno. Alternativu predloži samo ako je stvarno srodna onome što je traženo.
 - Nikada ne izmišljaj cene, termine, hotele ni uslove putovanja.
 - Kada nabrajaš više aranžmana, koristi listu.
 - Piši sažeto. Bez marketinškog jezika, bez familijarnog obraćanja, bez emojija.
@@ -158,46 +155,26 @@ const answerChain = ANSWER_PROMPT.pipe(answerLLM).pipe(new StringOutputParser())
 const asideChain = ASIDE_PROMPT.pipe(asideLLM).pipe(new StringOutputParser());
 
 // ---------------------------------------------------------------------------
-// Formatiranje
+// Istorija
 // ---------------------------------------------------------------------------
 
-const getFilename = (doc: Document): string => {
-  const meta = doc.metadata ?? {};
-  if (typeof meta.filename === 'string') return meta.filename;
-  if (typeof meta.source === 'string') {
-    return meta.source.split(/[\\/]/).pop() ?? 'nepoznat izvor';
-  }
-  return 'nepoznat izvor';
-};
-
-const toLabel = (filename: string): string =>
-  filename
-    .replace(/\.pdf$/i, '')
-    .replace(/\s*\(kliknuti za prikaz\)\s*/i, '')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-const renderTurns = (turns: [string, string][]): string =>
-  turns
-    .map(
-      ([human, ai]) =>
-        `Korisnik: ${human.slice(0, MAX_TURN_CHARS)}\n` +
-        `Asistent: ${ai.slice(0, MAX_TURN_CHARS)}`,
-    )
-    .join('\n\n');
-
+/**
+ * Poslednjih nekoliko razmena ide doslovno, sve pre toga u sažetak.
+ * Bez toga duži razgovor ili preplavi kontekst ili se tiho odseca.
+ */
 async function buildHistory(history: [string, string][]): Promise<string> {
   if (!history?.length) return '';
 
   const recent = history.slice(-VERBATIM_TURNS);
   const older = history.slice(0, -VERBATIM_TURNS);
 
-  let block = `Prethodni razgovor:\n${renderTurns(recent)}\n`;
+  let block = `Prethodni razgovor:\n${renderTurns(recent, MAX_TURN_CHARS)}\n`;
 
   if (older.length > 0) {
     try {
-      const summary = await summaryChain.invoke({ transcript: renderTurns(older) });
+      const summary = await summaryChain.invoke({
+        transcript: renderTurns(older, MAX_TURN_CHARS),
+      });
       block = `Ranije u razgovoru (sažetak):\n${summary.trim()}\n\n${block}`;
     } catch {
       // Ako sažimanje padne, radimo samo sa skorašnjim razmenama.
@@ -207,57 +184,9 @@ async function buildHistory(history: [string, string][]): Promise<string> {
   return block;
 }
 
-/**
- * Ograničava broj fragmenata po dokumentu, čuvajući redosled po skoru.
- * Rezultat je pokrivenost više cenovnika umesto osam komada istog.
- */
-function diversify(scored: [Document, number][]): [Document, number][] {
-  const perDocument = new Map<string, number>();
-  const kept: [Document, number][] = [];
-
-  for (const entry of scored) {
-    const filename = getFilename(entry[0]);
-    const used = perDocument.get(filename) ?? 0;
-    if (used >= MAX_PER_DOCUMENT) continue;
-
-    perDocument.set(filename, used + 1);
-    kept.push(entry);
-  }
-
-  return kept;
-}
-
-function formatDocuments(scored: [Document, number][]): {
-  context: string;
-  sources: SourceRef[];
-} {
-  const blocks: string[] = [];
-  const sources: SourceRef[] = [];
-  let total = 0;
-
-  for (const [doc, score] of scored) {
-    const content = doc.pageContent.trim();
-    if (!content) continue;
-
-    const filename = getFilename(doc);
-    const label = toLabel(filename);
-    const block = `[${blocks.length + 1}] ${label}\n${content}`;
-
-    if (total + block.length > MAX_CONTEXT_CHARS) break;
-
-    blocks.push(block);
-    sources.push({ label, filename, excerpt: content.slice(0, 700), score });
-    total += block.length;
-  }
-
-  return { context: blocks.join('\n\n---\n\n'), sources };
-}
-
 // ---------------------------------------------------------------------------
 // Ruter
 // ---------------------------------------------------------------------------
-
-const VALID_INTENTS: Intent[] = ['cenovnik', 'nastavak', 'razgovor', 'van_teme'];
 
 async function route(
   question: string,
@@ -269,26 +198,10 @@ async function route(
       chat_history: historyBlock || 'Razgovor tek počinje.',
     });
 
-    // Model ponekad obavije JSON u markdown ogradu uprkos uputstvu.
-    const cleaned = raw.replace(/```json|```/g, '').trim();
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(match ? match[0] : cleaned) as {
-      namera?: string;
-      pitanje?: string;
-    };
-
-    const intent = VALID_INTENTS.includes(parsed.namera as Intent)
-      ? (parsed.namera as Intent)
-      : 'cenovnik';
-
-    const rewritten = typeof parsed.pitanje === 'string' ? parsed.pitanje.trim() : '';
-
-    return {
-      intent,
-      standaloneQuestion: rewritten.length > 2 ? rewritten : question,
-    };
+    // Parsiranje je pokriveno testovima i samo pada na siguran default.
+    return parseRouterResponse(raw, question);
   } catch (err) {
-    console.warn('[router] neuspeh, koristim cenovnik:', err);
+    console.warn('[router] poziv nije uspeo, koristim cenovnik:', err);
     return { intent: 'cenovnik', standaloneQuestion: question };
   }
 }
@@ -309,6 +222,7 @@ export async function answerQuestion({
   k?: number;
 }): Promise<AnswerResult> {
   const timings: Record<string, number> = {};
+
   const mark = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
     const start = Date.now();
     const result = await fn();
@@ -342,7 +256,10 @@ export async function answerQuestion({
   const scored = await mark('search', () => search(standaloneQuestion, k));
   const topScore = scored.length > 0 ? scored[0][1] : null;
 
-  const relevant = diversify(scored.filter(([, score]) => score >= RELEVANCE_FLOOR));
+  const relevant = diversify(
+    scored.filter(([, score]) => score >= RELEVANCE_FLOOR),
+    MAX_PER_DOCUMENT,
+  );
 
   if (relevant.length === 0) {
     return {
@@ -357,7 +274,7 @@ export async function answerQuestion({
     };
   }
 
-  const { context, sources } = formatDocuments(relevant);
+  const { context, sources } = formatDocuments(relevant, MAX_CONTEXT_CHARS);
 
   const text = await mark('answer', () =>
     answerChain.invoke({
