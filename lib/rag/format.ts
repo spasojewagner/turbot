@@ -1,11 +1,10 @@
 import { Document } from '@langchain/core/documents';
 
 /**
- * Čiste funkcije izvučene iz `utils/makechain.ts`.
+ * Čiste funkcije RAG sloja.
  *
- * Razlog za izdvajanje je testabilnost: sve ovde je bez mrežnih poziva i bez
- * stanja, pa se pokriva jediničnim testovima bez ijednog poziva ka modelu.
- * Ono što ostaje u makechain-u su promptovi i orkestracija.
+ * Sve ovde je bez mrežnih poziva i bez stanja, pa se pokriva jediničnim
+ * testovima bez ijednog poziva ka modelu.
  */
 
 export type Intent = 'cenovnik' | 'nastavak' | 'razgovor' | 'van_teme';
@@ -32,7 +31,6 @@ export function getFilename(doc: Document): string {
   return 'nepoznat izvor';
 }
 
-/** Čitljiv naziv aranžmana iz imena fajla. */
 export function toLabel(filename: string): string {
   return filename
     .replace(/\.pdf$/i, '')
@@ -55,7 +53,6 @@ export function renderTurns(turns: [string, string][], maxChars = 700): string {
     .join('\n\n');
 }
 
-/** Odbacuje sve što ne odgovara obliku [pitanje, odgovor]. */
 export function normalizeHistory(input: unknown, maxTurns = 12): [string, string][] {
   if (!Array.isArray(input)) return [];
 
@@ -71,15 +68,34 @@ export function normalizeHistory(input: unknown, maxTurns = 12): [string, string
 }
 
 // ---------------------------------------------------------------------------
+// Prepoznavanje pojmova
+//
+// Alternative su namerno prefiksi ("termin", "hotel", "malt") i zato NEMA
+// zatvarajuće granice reči — sa `\b` na kraju bi "termini", "hotela" i
+// "Maltu" prestali da se poklapaju.
+// ---------------------------------------------------------------------------
+
+const POZDRAVI =
+  /^(zdravo|ćao|cao|hej|hi|hello|dobar dan|dobro jutro|dobro veče|dobro vece|hvala|pozdrav|važi|vazi|ok|okej|super)\b/i;
+
+/** Oblici opšteg znanja — pominju pojam, ali nemaju veze sa cenovnikom. */
+const OPSTE_ZNANJE =
+  /^(ko je|ko su|šta je|sta je|šta znači|sta znaci|gde se nalazi|kada je|zašto|zasto|koliko ima stanovnika|koji je glavni grad)/i;
+
+const PUTOVANJE =
+  /\b(cen[aeiu]|košta|kosta|aranžman|aranzman|termin|polaz|povrat|noćenj|nocenj|noći|noci|hotel|smeštaj|smestaj|avion|autobus|putovanj|ponud|doručak|dorucak|doplat|popust|taks|izlet|destinacij|rezervacij|osiguranj|prtljag|transfer|vodič|vodic|apartman|pansion)/i;
+
+const DESTINACIJE_IZVOR =
+  'rim|istanbul|malt|maroko|lisabon|porto|portugal|amsterdam|peterburg|bari|pulj|kairo|andaluzij|malag|škotsk|skotsk|englesk|francusk|pariz|ljubljan|švajcarsk|svajcarsk|ženev|zenev|bern|cirih|barselon|monako|milano|minhen|salcburg|trst|padov|španij|spanij|italij|grčk|grck|tursk|egipat|holandij|rusij|slovenij';
+
+const DESTINACIJE = new RegExp(`\\b(${DESTINACIJE_IZVOR})`, 'i');
+/** Ista lista sa globalnom zastavicom — za brojanje pogodaka. */
+const DESTINACIJE_SVE = new RegExp(`\\b(${DESTINACIJE_IZVOR})`, 'gi');
+
+// ---------------------------------------------------------------------------
 // Rezultati pretrage
 // ---------------------------------------------------------------------------
 
-/**
- * Ograničava broj fragmenata po dokumentu, čuvajući redosled po skoru.
- *
- * Bez ovoga pitanje o jednoj destinaciji vrati osam komada istog PDF-a, pa
- * pitanja tipa "aranžmani do 700 €" nikad ne vide više ponuda odjednom.
- */
 export function diversify(
   scored: [Document, number][],
   maxPerDocument = 2,
@@ -97,6 +113,23 @@ export function diversify(
   }
 
   return kept;
+}
+
+/**
+ * Koliko fragmenata po dokumentu propustiti.
+ *
+ * Pitanje o jednoj destinaciji traži dubinu — tabela sa cenama, termini i
+ * uslovi su u istom fajlu, često raštrkani kroz nekoliko fragmenata. Sa
+ * granicom od dva, cena je znala da bude odsečena.
+ *
+ * Široko pitanje ("aranžmani do 700 €") traži suprotno — pokrivenost više
+ * cenovnika, pa granica ostaje niska.
+ */
+export function perDocumentLimit(question: string): number {
+  const pogoci = question.match(DESTINACIJE_SVE) ?? [];
+  const jedinstvene = new Set(pogoci.map((p) => p.toLowerCase()));
+
+  return jedinstvene.size === 1 ? 4 : 2;
 }
 
 export function formatDocuments(
@@ -126,12 +159,48 @@ export function formatDocuments(
 }
 
 // ---------------------------------------------------------------------------
-// Ruter
+// Brzi ruter
 // ---------------------------------------------------------------------------
 
 /**
- * Parsira odgovor rutera.
+ * Klasifikacija bez poziva modelu, kada je ishod nedvosmislen.
  *
+ * Ruter je posle samog odgovora najskuplji deo lanca — na free tieru sa
+ * dvadeset zahteva dnevno, dva poziva po pitanju znače sedam pitanja umesto
+ * dvadeset.
+ *
+ * Vraća `null` kada nije sigurna, i tada se poziva model.
+ */
+export function quickRoute(question: string, hasHistory: boolean): Intent | null {
+  const q = question.trim();
+
+  if (q.length < 40 && POZDRAVI.test(q)) return 'razgovor';
+
+  // "Ko je predsednik Francuske" pominje destinaciju, a nije pitanje o
+  // cenovniku. Takve oblike prepuštamo modelu.
+  if (OPSTE_ZNANJE.test(q)) return null;
+
+  const pominjeDestinaciju = DESTINACIJE.test(q);
+  const pominjePutovanje = PUTOVANJE.test(q);
+
+  // Nijedan signal — može biti van teme, može biti nastavak.
+  if (!pominjeDestinaciju && !pominjePutovanje) return null;
+
+  // Bez istorije nastavak nije moguć.
+  if (!hasHistory) return 'cenovnik';
+
+  // Sa istorijom, ali sa izričito pomenutom destinacijom — pitanje stoji samo.
+  if (pominjeDestinaciju) return 'cenovnik';
+
+  // Ostalo su verovatno nastavci koji traže razrešavanje zamenica.
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Parsiranje odgovora rutera
+// ---------------------------------------------------------------------------
+
+/**
  * Najkrhkiji deo lanca: model ume da obavije JSON u markdown ogradu, doda
  * uvodnu rečenicu, ili vrati nameru koja nije u skupu. Sve to ovde pada na
  * siguran default umesto da ruši zahtev.

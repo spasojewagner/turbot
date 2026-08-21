@@ -18,7 +18,8 @@
     "pdf-doctor": "tsx scripts/pdf-doctor.ts",
     "ocr": "tsx -r dotenv/config scripts/ocr-scanned.ts dotenv_config_path=.env.local",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "probe-batch": "tsx -r dotenv/config scripts/probe-batch.ts dotenv_config_path=.env.local"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

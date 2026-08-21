@@ -12,36 +12,27 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   sources?: Source[];
+  /** Poruka koja se još ispisuje — koristi se za kursor u UI-ju. */
+  streaming?: boolean;
 }
 
-interface ApiResponse {
-  text?: string;
-  error?: string;
-  intent?: string;
-  retryAfter?: number;
-  sourceDocuments?: { pageContent: string; metadata?: Record<string, unknown> }[];
-  debug?: Record<string, unknown>;
-}
+export type Stage = 'razumevanje' | 'pretraga' | 'sastavljanje';
 
-/** Koliko razmena šaljemo serveru. Starije server sam sažima. */
+type StreamEvent =
+  | { type: 'status'; stage: Stage }
+  | { type: 'sources'; sources: Source[] }
+  | { type: 'token'; text: string }
+  | { type: 'done'; debug?: Record<string, unknown> }
+  | { type: 'error'; message: string };
+
 const MAX_HISTORY_TURNS = 12;
 
 const newId = () => Math.random().toString(36).slice(2, 10);
 
-function toSources(input: ApiResponse['sourceDocuments']): Source[] {
-  if (!Array.isArray(input)) return [];
-
-  return input.map((doc, i) => ({
-    label: typeof doc.metadata?.label === 'string' ? doc.metadata.label : `Izvor ${i + 1}`,
-    filename: typeof doc.metadata?.filename === 'string' ? doc.metadata.filename : '',
-    score: typeof doc.metadata?.score === 'number' ? doc.metadata.score : undefined,
-    excerpt: doc.pageContent ?? '',
-  }));
-}
-
 export function useChat({ debug = false }: { debug?: boolean } = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState(false);
+  const [stage, setStage] = useState<Stage | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const historyRef = useRef<[string, string][]>([]);
@@ -53,6 +44,10 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
     abortRef.current = null;
     pendingRef.current = false;
     setPending(false);
+    setStage(null);
+    setMessages((prev) =>
+      prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
+    );
   }, []);
 
   const send = useCallback(
@@ -65,10 +60,27 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
       pendingRef.current = true;
       setError(null);
       setPending(true);
-      setMessages((prev) => [...prev, { id: newId(), role: 'user', text: trimmed }]);
+      setStage('razumevanje');
+
+      const answerId = newId();
+
+      setMessages((prev) => [
+        ...prev,
+        { id: newId(), role: 'user', text: trimmed },
+        { id: answerId, role: 'assistant', text: '', streaming: true },
+      ]);
 
       const controller = new AbortController();
       abortRef.current = controller;
+
+      /** Akumulira se lokalno da bi na kraju ušlo u istoriju. */
+      let answerText = '';
+
+      const patch = (update: Partial<ChatMessage>) => {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === answerId ? { ...m, ...update } : m)),
+        );
+      };
 
       try {
         const response = await fetch('/api/chat', {
@@ -78,35 +90,87 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
           signal: controller.signal,
         });
 
-        const data: ApiResponse = await response.json().catch(() => ({}));
-
-        if (!response.ok || data.error) {
+        if (!response.ok || !response.body) {
+          const data = await response.json().catch(() => ({}));
           setError(data.error ?? `Zahtev nije uspeo (${response.status}).`);
+          setMessages((prev) => prev.filter((m) => m.id !== answerId));
           return;
         }
 
-        const text = data.text ?? '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        /** Ostatak reda koji je stigao presečen između dva chunka. */
+        let buffer = '';
 
-        // Eksplicitna anotacija — bez nje TypeScript vidi string[], ne tuple.
-        const turn: [string, string] = [trimmed, text];
-        historyRef.current = [...historyRef.current, turn].slice(-MAX_HISTORY_TURNS);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: newId(),
-            role: 'assistant',
-            text,
-            sources: toSources(data.sourceDocuments),
-          },
-        ]);
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+
+            let event: StreamEvent;
+            try {
+              event = JSON.parse(line) as StreamEvent;
+            } catch {
+              continue;
+            }
+
+            switch (event.type) {
+              case 'status':
+                setStage(event.stage);
+                break;
+
+              case 'sources':
+                patch({ sources: event.sources });
+                break;
+
+              case 'token':
+                answerText += event.text;
+                patch({ text: answerText });
+                break;
+
+              case 'done':
+                if (debug && event.debug) console.log('[debug]', event.debug);
+                break;
+
+              case 'error':
+                setError(event.message);
+                break;
+            }
+          }
+        }
+
+        patch({ streaming: false });
+
+        if (answerText) {
+          const turn: [string, string] = [trimmed, answerText];
+          historyRef.current = [...historyRef.current, turn].slice(-MAX_HISTORY_TURNS);
+        } else {
+          setMessages((prev) => prev.filter((m) => m.id !== answerId));
+        }
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          // Prekid je namerna radnja korisnika — zadržavamo ono što je stiglo.
+          patch({ streaming: false });
+          if (answerText) {
+            const turn: [string, string] = [trimmed, answerText];
+            historyRef.current = [...historyRef.current, turn].slice(-MAX_HISTORY_TURNS);
+          }
+          return;
+        }
+
         setError('Nije moguće povezivanje sa serverom.');
+        setMessages((prev) => prev.filter((m) => m.id !== answerId));
       } finally {
         pendingRef.current = false;
         abortRef.current = null;
         setPending(false);
+        setStage(null);
       }
     },
     [debug],
@@ -119,5 +183,14 @@ export function useChat({ debug = false }: { debug?: boolean } = {}) {
     setError(null);
   }, [stop]);
 
-  return { messages, pending, error, send, stop, reset, clearError: () => setError(null) };
+  return {
+    messages,
+    pending,
+    stage,
+    error,
+    send,
+    stop,
+    reset,
+    clearError: () => setError(null),
+  };
 }

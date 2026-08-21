@@ -7,6 +7,8 @@ import {
   getFilename,
   normalizeHistory,
   parseRouterResponse,
+  perDocumentLimit,
+  quickRoute,
   renderTurns,
   toLabel,
 } from '@/lib/rag/format';
@@ -136,6 +138,25 @@ describe('diversify', () => {
   });
 });
 
+describe('perDocumentLimit', () => {
+  it('daje veći limit kada je pomenuta jedna destinacija', () => {
+    expect(perDocumentLimit('Koliko košta Rim avionom tri noćenja?')).toBe(4);
+    expect(perDocumentLimit('Šta je uključeno u cenu za Maltu?')).toBe(4);
+  });
+
+  it('daje niži limit kada je pomenuto više destinacija', () => {
+    expect(perDocumentLimit('Uporedi Rim, Istanbul i Amsterdam')).toBe(2);
+  });
+
+  it('daje niži limit kada nijedna destinacija nije pomenuta', () => {
+    expect(perDocumentLimit('Aranžmani do 700 € po osobi')).toBe(2);
+  });
+
+  it('ne broji ponavljanje iste destinacije kao više njih', () => {
+    expect(perDocumentLimit('Rim, i to Rim avionom, koliko košta Rim?')).toBe(4);
+  });
+});
+
 describe('formatDocuments', () => {
   it('numeriše izvore i dodaje naziv aranžmana', () => {
     const { context } = formatDocuments([[doc('Rim_Avio.pdf', 'cena 699 €'), 0.9]]);
@@ -165,6 +186,58 @@ describe('formatDocuments', () => {
   it('prenosi skor u izvore', () => {
     const { sources } = formatDocuments([[doc('a.pdf', 'tekst'), 0.77]]);
     expect(sources[0].score).toBe(0.77);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('quickRoute', () => {
+  it('prepoznaje pozdrav bez poziva modelu', () => {
+    expect(quickRoute('Zdravo', false)).toBe('razgovor');
+    expect(quickRoute('hvala ti puno', false)).toBe('razgovor');
+    expect(quickRoute('Dobar dan', true)).toBe('razgovor');
+  });
+
+  it('ne proglašava dugačko pitanje pozdravom', () => {
+    const dugacko = 'Zdravo, zanima me koliko košta aranžman za Rim u maju za dvoje';
+    expect(quickRoute(dugacko, false)).toBe('cenovnik');
+  });
+
+  it('prepoznaje pitanje o cenovniku bez istorije', () => {
+    expect(quickRoute('Koliko košta Rim?', false)).toBe('cenovnik');
+    expect(quickRoute('Koji su termini polaska?', false)).toBe('cenovnik');
+    expect(quickRoute('Ima li slobodnih hotela?', false)).toBe('cenovnik');
+  });
+
+  it('prepoznaje samostalno pitanje i kada postoji istorija', () => {
+    expect(quickRoute('A koliko košta Istanbul?', true)).toBe('cenovnik');
+    expect(quickRoute('Šta imate za Maltu?', true)).toBe('cenovnik');
+  });
+
+  it('prepušta modelu nastavak bez pomenute destinacije', () => {
+    expect(quickRoute('a koliko to košta?', true)).toBeNull();
+    expect(quickRoute('šta je uključeno?', true)).toBeNull();
+  });
+
+  it('prepušta modelu pitanja bez ijednog signala', () => {
+    expect(quickRoute('koliko je 2+2', false)).toBeNull();
+  });
+
+  it('prepušta modelu pitanja opšteg znanja koja pominju destinaciju', () => {
+    expect(quickRoute('ko je predsednik Francuske', false)).toBeNull();
+    expect(quickRoute('gde se nalazi Malta', false)).toBeNull();
+    expect(quickRoute('koji je glavni grad Portugala', false)).toBeNull();
+  });
+
+  it('radi bez dijakritike', () => {
+    expect(quickRoute('koliko kosta Rim', false)).toBe('cenovnik');
+    expect(quickRoute('koji su termini za Svajcarsku', false)).toBe('cenovnik');
+  });
+
+  it('poklapa se i na izmenjene oblike reči', () => {
+    expect(quickRoute('koji su termini polaska', false)).toBe('cenovnik');
+    expect(quickRoute('ima li hotela sa bazenom', false)).toBe('cenovnik');
+    expect(quickRoute('šta imate za Maltu', false)).toBe('cenovnik');
   });
 });
 

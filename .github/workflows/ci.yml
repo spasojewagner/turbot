@@ -23,8 +23,11 @@ jobs:
           node-version: 20
           cache: npm
 
+      # --legacy-peer-deps je neophodan zbog sukoba između typeorm-a i
+      # @langchain/community oko verzije better-sqlite3. Kada se napušteni
+      # @langchain/community ukloni, ova zastavica prestaje da bude potrebna.
       - name: Instalacija
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: Tipovi
         run: npm run type-check
