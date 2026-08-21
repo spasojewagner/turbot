@@ -4,6 +4,7 @@ import { StringOutputParser } from '@langchain/core/output_parsers';
 import { Document } from '@langchain/core/documents';
 
 import { env } from '@/lib/env';
+import { createLogger, type Logger } from '@/lib/logger';
 import {
   diversify,
   formatDocuments,
@@ -107,8 +108,7 @@ Sažetak:`);
 // Modeli
 //
 // Budžeti tokena su namerno velikodušni: Gemini 3.x troši deo izlaza na
-// interno rezonovanje pre nego što išta ispiše. Sa 300 tokena odgovor je
-// stizao prekinut usred rečenice.
+// interno rezonovanje pre nego što išta ispiše.
 // ---------------------------------------------------------------------------
 
 const answerLLM = new ChatGoogleGenerativeAI({
@@ -116,7 +116,7 @@ const answerLLM = new ChatGoogleGenerativeAI({
   model: env.CHAT_MODEL,
   temperature: 0.1,
   maxRetries: 2,
-  maxOutputTokens: 8192,
+  maxOutputTokens: 4096,
 });
 
 const asideLLM = new ChatGoogleGenerativeAI({
@@ -144,11 +144,10 @@ const asideChain = ASIDE_PROMPT.pipe(asideLLM).pipe(new StringOutputParser());
 // Istorija i rutiranje
 // ---------------------------------------------------------------------------
 
-/**
- * Poslednjih nekoliko razmena ide doslovno, sve pre toga u sažetak.
- * Bez toga duži razgovor ili preplavi kontekst ili se tiho odseca.
- */
-async function buildHistory(history: [string, string][]): Promise<string> {
+async function buildHistory(
+  history: [string, string][],
+  log: Logger,
+): Promise<string> {
   if (!history?.length) return '';
 
   const recent = history.slice(-VERBATIM_TURNS);
@@ -162,8 +161,11 @@ async function buildHistory(history: [string, string][]): Promise<string> {
         transcript: renderTurns(older, MAX_TURN_CHARS),
       });
       block = `Ranije u razgovoru (sažetak):\n${summary.trim()}\n\n${block}`;
-    } catch {
-      // Ako sažimanje padne, radimo samo sa skorašnjim razmenama.
+      log.info('Istorija sažeta', { starijihRazmena: older.length });
+    } catch (err) {
+      log.warn('Sažimanje istorije nije uspelo', {
+        greska: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -174,10 +176,15 @@ async function route(
   question: string,
   historyBlock: string,
   hasHistory: boolean,
+  log: Logger,
 ): Promise<{ intent: Intent; standaloneQuestion: string }> {
   // Većina stvarnih pitanja se prepoznaje bez poziva modelu.
   const brzi = quickRoute(question, hasHistory);
-  if (brzi) return { intent: brzi, standaloneQuestion: question };
+
+  if (brzi) {
+    log.info('Ruter: heuristika', { namera: brzi });
+    return { intent: brzi, standaloneQuestion: question };
+  }
 
   try {
     const raw = await routerChain.invoke({
@@ -185,9 +192,17 @@ async function route(
       chat_history: historyBlock || 'Razgovor tek počinje.',
     });
 
-    return parseRouterResponse(raw, question);
+    const result = parseRouterResponse(raw, question);
+    log.info('Ruter: model', {
+      namera: result.intent,
+      preformulisano: result.standaloneQuestion !== question,
+    });
+
+    return result;
   } catch (err) {
-    console.warn('[router] poziv nije uspeo, koristim cenovnik:', err);
+    log.warn('Ruter pao, koristim cenovnik', {
+      greska: err instanceof Error ? err.message : String(err),
+    });
     return { intent: 'cenovnik', standaloneQuestion: question };
   }
 }
@@ -200,8 +215,7 @@ async function route(
  * Odgovara na pitanje i emituje događaje kako obrada odmiče.
  *
  * Streaming je ovde više od kozmetike: ruter i pretraga zajedno traju
- * nekoliko sekundi pre nego što model počne da piše, pa bi bez statusa
- * korisnik gledao u prazno.
+ * nekoliko sekundi pre nego što model počne da piše.
  */
 export async function* streamAnswer({
   question,
@@ -209,15 +223,19 @@ export async function* streamAnswer({
   search,
   k = env.RETRIEVAL_K,
   signal,
+  logger,
 }: {
   question: string;
   history?: [string, string][];
   search: SearchFn;
   k?: number;
   signal?: AbortSignal;
+  logger?: Logger;
 }): AsyncGenerator<StreamEvent> {
+  const log = logger ?? createLogger('bez-id');
   const timings: Record<string, number> = {};
   const started = Date.now();
+
   const mark = (name: string, from: number) => {
     timings[name] = Date.now() - from;
   };
@@ -226,11 +244,12 @@ export async function* streamAnswer({
     yield { type: 'status', stage: 'razumevanje' };
 
     const t0 = Date.now();
-    const historyBlock = await buildHistory(history);
+    const historyBlock = await buildHistory(history, log);
     const { intent, standaloneQuestion } = await route(
       question,
       historyBlock,
       history.length > 0,
+      log,
     );
     mark('router', t0);
 
@@ -244,11 +263,20 @@ export async function* streamAnswer({
         chat_history: historyBlock,
       });
 
+      let tokens = 0;
       for await (const chunk of asideStream) {
-        if (signal?.aborted) return;
-        if (chunk) yield { type: 'token', text: chunk };
+        if (signal?.aborted) {
+          log.info('Prekinuto od strane korisnika', { faza: 'aside', tokens });
+          return;
+        }
+        if (chunk) {
+          tokens += 1;
+          yield { type: 'token', text: chunk };
+        }
       }
       mark('answer', t1);
+
+      log.info('Odgovor bez pretrage', { namera: intent, ...timings });
 
       yield {
         type: 'done',
@@ -277,7 +305,21 @@ export async function* streamAnswer({
       limit,
     );
 
+    log.info('Pretraga završena', {
+      dohvaceno: scored.length,
+      zadrzano: relevant.length,
+      topScore,
+      limitPoDokumentu: limit,
+      ms: timings.search,
+    });
+
     if (relevant.length === 0) {
+      log.warn('Nijedan rezultat nije prešao prag', {
+        topScore,
+        prag: env.RELEVANCE_FLOOR,
+        pitanje: standaloneQuestion,
+      });
+
       yield {
         type: 'token',
         text:
@@ -304,11 +346,27 @@ export async function* streamAnswer({
       question: standaloneQuestion,
     });
 
+    let tokens = 0;
     for await (const chunk of answerStream) {
-      if (signal?.aborted) return;
-      if (chunk) yield { type: 'token', text: chunk };
+      if (signal?.aborted) {
+        log.info('Prekinuto od strane korisnika', { faza: 'odgovor', tokens });
+        return;
+      }
+      if (chunk) {
+        tokens += 1;
+        yield { type: 'token', text: chunk };
+      }
     }
     mark('answer', t3);
+
+    log.info('Odgovor završen', {
+      namera: intent,
+      izvora: sources.length,
+      kontekstZnakova: context.length,
+      tokena: tokens,
+      ...timings,
+      ukupno: Date.now() - started,
+    });
 
     yield {
       type: 'done',
@@ -325,7 +383,7 @@ export async function* streamAnswer({
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[stream] greška:', message);
+    log.error('Obrada pala', { greska: message, ...timings });
     yield { type: 'error', message };
   }
 }
