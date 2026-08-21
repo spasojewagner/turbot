@@ -73,14 +73,23 @@ export default function Landing() {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState<number | null>(null);
   const [primerIndex, setPrimerIndex] = useState(0);
-  const [introDone, setIntroDone] = useState(true);
+  
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const router = useRouter();
 
-  useEffect(() => {
-    if (shouldPlayIntro()) setIntroDone(false);
-  }, []);
+  /**
+ * Kreće se od pretpostavke da intro ide.
+ *
+ * Obrnuto bi značilo da se u prvom renderu — pre nego što useEffect stigne
+ * da proveri sessionStorage — landing prikaže pa sakrije. To je bljesak od
+ * pola sekunde koji se vidi pre nego što video krene.
+ */
+const [introDone, setIntroDone] = useState(false);
+
+useEffect(() => {
+  if (!shouldPlayIntro()) setIntroDone(true);
+}, []);
 
   useEffect(() => {
     if (query) return;
@@ -143,35 +152,33 @@ export default function Landing() {
 
         <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 lg:px-10">
           <nav className="flex shrink-0 items-center justify-between py-5">
-            <div className="flex items-center gap-3">
-              <div className="h-9 w-9 overflow-hidden rounded-full bg-ink-raised ring-1 ring-ink-line">
-                <Image
-                  src="/robot.png"
-                  alt=""
-                  width={72}
-                  height={72}
-                  className="h-full w-full object-cover"
-                  priority
-                />
-              </div>
-              <span className="select-none font-display text-xl font-medium tracking-tight">
-                Tur<span className="text-amber">Bot</span>
-              </span>
-            </div>
+  <div className="flex items-center gap-3">
+    <div className="h-9 w-9 overflow-hidden rounded-full bg-ink-raised ring-1 ring-ink-line">
+      <Image
+        src="/robot.png"
+        alt=""
+        width={72}
+        height={72}
+        className="h-full w-full object-cover"
+        priority
+      />
+    </div>
+    <span className="select-none font-display text-xl font-medium tracking-tight">
+      Tur<span className="text-amber">Bot</span>
+    </span>
+  </div>
 
-            <RouteTicker onSelect={(name) => go(`Koje ponude imate za ${name}`)} />
+  <RouteTicker onSelect={(name) => go(`Koje ponude imate za ${name}`)} />
 
-          <Link
-  href="/chat"
-  aria-label="Otvori chat"
-  title="Otvori chat"
-  className="flex h-10 w-10 items-center justify-center rounded-full border border-ink-line text-mute-light transition-colors hover:border-amber hover:text-amber focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber"
->
-  <MessageSquare className="h-[18px] w-[18px]" aria-hidden="true" />
-</Link>
-              <MessageSquare className="h-[18px] w-[18px]" aria-hidden="true" />
-          
-          </nav>
+  <Link
+    href="/chat"
+    aria-label="Otvori chat"
+    title="Otvori chat"
+    className="flex h-10 w-10 items-center justify-center rounded-full border border-ink-line text-mute-light transition-colors hover:border-amber hover:text-amber focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber"
+  >
+    <MessageSquare className="h-[18px] w-[18px]" aria-hidden="true" />
+  </Link>
+</nav>
 
           <div className="flex flex-1 flex-col items-center justify-center pb-14 pt-6 text-center">
             <h1 className="max-w-3xl animate-fade-up font-display text-[clamp(2.5rem,6vw,4.25rem)] font-medium leading-[1.03] tracking-tight">

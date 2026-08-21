@@ -4,6 +4,7 @@ import { PineconeStore } from '@langchain/pinecone';
 import { Pinecone } from '@pinecone-database/pinecone';
 
 import { env } from '@/lib/env';
+import { createLogger, requestIdFrom } from '@/lib/logger';
 import { streamAnswer, type SearchFn, type StreamEvent } from '@/utils/makechain';
 import { normalizeHistory } from '@/lib/rag/format';
 
@@ -77,8 +78,6 @@ async function getVectorStore(): Promise<PineconeStore> {
 
   if (cachedVectorStore && cachedEmbeddings && !isStale) return cachedVectorStore;
 
-  console.log(`Inicijalizacija vector store-a (${env.EMBEDDING_MODEL})...`);
-
   cachedEmbeddings = new GoogleGenerativeAIEmbeddings({
     apiKey: env.GEMINI_API_KEY,
     model: env.EMBEDDING_MODEL,
@@ -105,6 +104,8 @@ async function getVectorStore(): Promise<PineconeStore> {
 // ---------------------------------------------------------------------------
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const log = createLogger(requestIdFrom(req.headers));
+
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Samo POST zahtevi su dozvoljeni' });
@@ -116,9 +117,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: 'Treba mi pitanje da mogu da odgovorim.' });
   }
 
-  const rateLimit = checkRateLimit(getClientIp(req));
+  const ip = getClientIp(req);
+  const rateLimit = checkRateLimit(ip);
 
   if (!rateLimit.allowed) {
+    log.warn('Rate limit', { retryAfter: rateLimit.retryAfter });
     res.setHeader('Retry-After', rateLimit.retryAfter);
     return res.status(429).json({
       error: 'Previše pitanja u kratkom vremenu. Sačekaj minut.',
@@ -128,6 +131,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const sanitizedQuestion = question.trim().slice(0, MAX_QUESTION_LENGTH);
   const chatHistory = normalizeHistory(history, MAX_HISTORY_TURNS);
+
+  log.info('Novo pitanje', {
+    pitanje: sanitizedQuestion,
+    razmenaUIstoriji: chatHistory.length,
+  });
 
   /**
    * NDJSON: jedan JSON objekat po redu.
@@ -141,6 +149,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     Connection: 'keep-alive',
     // Sprečava bafering na obrnutim proksijima poput nginxa.
     'X-Accel-Buffering': 'no',
+    // Omogućava da se u browseru poveže zahtev sa zapisom u logu.
+    'X-Request-Id': log.requestId,
   });
 
   const send = (event: StreamEvent) => {
@@ -152,7 +162,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   req.on('close', () => controller.abort());
 
   try {
-    const vectorStore = await getVectorStore();
+    const vectorStore = await log.time('Inicijalizacija vector store-a', getVectorStore);
 
     /**
      * Skorovi su potrebni da bi se odbacili nerelevantni rezultati, pa se
@@ -166,6 +176,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       search,
       k: env.RETRIEVAL_K,
       signal: controller.signal,
+      logger: log,
     })) {
       if (controller.signal.aborted) break;
 
@@ -179,7 +190,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('Greška u chat handleru:', message);
+    log.error('Handler pao', { greska: message });
 
     const friendly = message.includes('quota')
       ? 'Dnevna kvota je iskorišćena. Probaj kasnije.'
