@@ -1,6 +1,14 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 
+/**
+ * Globus sa lukovima od Beograda do destinacija koje se STVARNO nalaze
+ * u indeksiranim cenovnicima. Nije dekoracija — vizualizuje šta bot zna.
+ *
+ * Lista je ručno održavana. Ako se doda ili ukloni cenovnik, dopuni je —
+ * globus koji prikazuje manje nego što bot zna obmanjuje posetioca, a onaj
+ * koji prikazuje više obećava ono što ne postoji.
+ */
 const ORIGIN = { lat: 44.79, lon: 20.45 };
 
 export const DESTINATIONS = [
@@ -14,14 +22,24 @@ export const DESTINATIONS = [
   { name: 'Sankt Peterburg', lat: 59.93, lon: 30.34 },
   { name: 'Bari', lat: 41.12, lon: 16.87 },
   { name: 'Kairo', lat: 30.04, lon: 31.24 },
-  { name: 'Andaluzija', lat: 37.39, lon: -5.98 },
+  { name: 'Andaluzija', lat: 36.72, lon: -4.42 },
   { name: 'Škotska', lat: 55.95, lon: -3.19 },
-  { name: 'Francuska', lat: 48.86, lon: 2.35 },
+  { name: 'Pariz', lat: 48.86, lon: 2.35 },
+  // Dopunjeno nakon što se u odgovorima pojavilo da korpus sadrži i ove.
+  { name: 'Ljubljana', lat: 46.06, lon: 14.51 },
+  { name: 'Švajcarska', lat: 46.95, lon: 7.45 },
+  { name: 'Barselona', lat: 41.39, lon: 2.17 },
+  { name: 'Monako', lat: 43.74, lon: 7.42 },
+  { name: 'Milano', lat: 45.46, lon: 9.19 },
+  { name: 'Minhen', lat: 48.14, lon: 11.58 },
+  { name: 'Salcburg', lat: 47.81, lon: 13.05 },
+  { name: 'Trst', lat: 45.65, lon: 13.78 },
 ];
 
 const RADIUS = 1;
 const COLOR_AMBER = 0xf0a22e;
 const COLOR_TEAL = 0x3aa0a0;
+const COLOR_CORE = 0x0b1a2a;
 
 const INITIAL_YAW = 1.93;
 const INITIAL_PITCH = 0.28;
@@ -81,6 +99,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
   const routesRef = useRef<Route[]>([]);
   const activeRef = useRef<number | null>(null);
 
+  /** Hover u listi destinacija osvetljava odgovarajući luk. */
   useEffect(() => {
     activeRef.current = activeIndex;
 
@@ -89,9 +108,9 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
       const isDimmed = activeIndex !== null && !isActive;
 
       route.arc.color.setHex(isActive ? COLOR_AMBER : COLOR_TEAL);
-      route.arc.opacity = isActive ? 1 : isDimmed ? 0.1 : 0.55;
+      route.arc.opacity = isActive ? 1 : isDimmed ? 0.08 : 0.45;
       route.dot.color.setHex(isActive ? COLOR_AMBER : COLOR_TEAL);
-      route.dot.opacity = isDimmed ? 0.15 : 1;
+      route.dot.opacity = isDimmed ? 0.12 : 1;
       route.dotMesh.scale.setScalar(isActive ? 2 : 1);
       route.traveller.visible = !isDimmed;
     });
@@ -120,24 +139,26 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-    const earth = new THREE.Mesh(
-      new THREE.SphereGeometry(RADIUS, 64, 48),
-      new THREE.MeshPhongMaterial({ map: texture, shininess: 6, specular: 0x1a2a3a }),
+    world.add(
+      new THREE.Mesh(
+        new THREE.SphereGeometry(RADIUS, 64, 48),
+        new THREE.MeshPhongMaterial({ map: texture, shininess: 6, specular: 0x1a2a3a }),
+      ),
     );
-    world.add(earth);
 
     // Atmosfera stoji van rotirajuće grupe — oreol ne treba da se vrti.
-    const atmosphere = new THREE.Mesh(
-      new THREE.SphereGeometry(RADIUS * 1.16, 64, 48),
-      new THREE.ShaderMaterial({
-        vertexShader: ATMOSPHERE_VERTEX,
-        fragmentShader: ATMOSPHERE_FRAGMENT,
-        blending: THREE.AdditiveBlending,
-        side: THREE.BackSide,
-        transparent: true,
-      }),
+    scene.add(
+      new THREE.Mesh(
+        new THREE.SphereGeometry(RADIUS * 1.16, 64, 48),
+        new THREE.ShaderMaterial({
+          vertexShader: ATMOSPHERE_VERTEX,
+          fragmentShader: ATMOSPHERE_FRAGMENT,
+          blending: THREE.AdditiveBlending,
+          side: THREE.BackSide,
+          transparent: true,
+        }),
+      ),
     );
-    scene.add(atmosphere);
 
     // Sunce sa strane daje granicu dana i noći.
     const sun = new THREE.DirectionalLight(0xfff0dd, 2.6);
@@ -148,7 +169,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
     const originVec = latLonToVector3(ORIGIN.lat, ORIGIN.lon);
 
     const originDot = new THREE.Mesh(
-      new THREE.SphereGeometry(0.022, 14, 14),
+      new THREE.SphereGeometry(0.024, 14, 14),
       new THREE.MeshBasicMaterial({ color: COLOR_AMBER }),
     );
     originDot.position.copy(originVec.clone().multiplyScalar(1.005));
@@ -160,10 +181,15 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
       const destVec = latLonToVector3(dest.lat, dest.lon);
       const curve = buildArc(originVec, destVec);
 
+      /**
+       * Sa dvadesetak destinacija lukovi počinju da se preklapaju, pa je
+       * osnovna providnost niža nego ranije — inače se globus izgubi ispod
+       * mreže linija.
+       */
       const arcMaterial = new THREE.LineBasicMaterial({
         color: COLOR_TEAL,
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.45,
       });
       world.add(
         new THREE.Line(
@@ -176,12 +202,12 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
         color: COLOR_TEAL,
         transparent: true,
       });
-      const dotMesh = new THREE.Mesh(new THREE.SphereGeometry(0.014, 10, 10), dotMaterial);
+      const dotMesh = new THREE.Mesh(new THREE.SphereGeometry(0.013, 10, 10), dotMaterial);
       dotMesh.position.copy(destVec.clone().multiplyScalar(1.005));
       world.add(dotMesh);
 
       const traveller = new THREE.Mesh(
-        new THREE.SphereGeometry(0.011, 8, 8),
+        new THREE.SphereGeometry(0.01, 8, 8),
         new THREE.MeshBasicMaterial({ color: COLOR_AMBER }),
       );
       world.add(traveller);
@@ -197,6 +223,10 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
     });
 
     routesRef.current = routes;
+
+    // -----------------------------------------------------------------------
+    // Interakcija
+    // -----------------------------------------------------------------------
 
     let dragging = false;
     let lastX = 0;
@@ -252,6 +282,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
       frame = requestAnimationFrame(tick);
 
       if (!dragging) {
+        // Rotacija staje dok je neka destinacija istaknuta.
         world.rotation.y += (activeRef.current === null ? autoSpin : 0) + velocity;
         velocity *= 0.94;
       }
@@ -268,6 +299,7 @@ export default function Globe({ activeIndex = null }: { activeIndex?: number | n
 
     tick();
 
+    // Pauza kada tab nije vidljiv — bez ovoga GPU radi u prazno.
     const onVisibility = () => {
       if (document.hidden) {
         running = false;

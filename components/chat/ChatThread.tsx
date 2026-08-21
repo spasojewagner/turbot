@@ -4,6 +4,10 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 
 import type { ChatMessage, Source, Stage } from '@/hooks/useChat';
 
+/**
+ * Markdown se stilizuje ručno jer @tailwindcss/typography nije instaliran,
+ * a odgovori su gotovo uvek ugnježdene liste sa cenama i datumima.
+ */
 const markdown: Components = {
   p: ({ node, ...props }) => <p {...props} className="mb-3 leading-[1.7] last:mb-0" />,
   ul: ({ node, ...props }) => <ul {...props} className="mb-3 space-y-1.5 last:mb-0" />,
@@ -19,7 +23,7 @@ const markdown: Components = {
   code: ({ node, ...props }) => (
     <code
       {...props}
-      className="rounded bg-ink-raised px-1.5 py-0.5 font-mono text-[0.9em] text-amber"
+      className="rounded-control bg-ink-raised px-1.5 py-0.5 font-mono text-[0.9em] text-amber"
     />
   ),
   a: ({ node, ...props }) => (
@@ -74,7 +78,7 @@ function SourceList({ sources }: { sources: Source[] }) {
             type="button"
             onClick={() => setOpen(open === i ? null : i)}
             aria-expanded={open === i}
-            className={`rounded-md border px-2.5 py-1.5 text-left font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal ${
+            className={`rounded-control border px-2.5 py-1.5 text-left font-mono text-xs transition-colors duration-150 ease-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal ${
               open === i
                 ? 'border-teal bg-teal/10 text-teal'
                 : 'border-ink-line text-mute hover:border-mute hover:text-paper-dim'
@@ -87,7 +91,7 @@ function SourceList({ sources }: { sources: Source[] }) {
       </div>
 
       {open !== null && (
-        <div className="mt-3 rounded-lg border border-ink-line bg-ink-soft p-3.5">
+        <div className="mt-3 animate-enter rounded-panel border border-ink-line bg-ink-soft p-3.5">
           <p className="mb-2 break-all font-mono text-[11px] text-mute">
             {sources[open].filename}
             {typeof sources[open].score === 'number' && (
@@ -111,11 +115,22 @@ export default function ChatThread({
   stage: Stage | null;
 }) {
   return (
-    <div className="space-y-7">
+    /**
+     * `aria-live="polite"` je obavezan: tekst stiže streamom, pa bez njega
+     * čitač ekrana ne najavljuje ništa. `atomic=false` da se čita samo ono
+     * što je novo, ne ceo razgovor pri svakoj promeni.
+     */
+    <div
+      className="space-y-7"
+      role="log"
+      aria-live="polite"
+      aria-atomic="false"
+      aria-label="Razgovor"
+    >
       {messages.map((message) =>
         message.role === 'user' ? (
           <div key={message.id} className="flex justify-end">
-            <p className="max-w-[80%] rounded-2xl rounded-br-md bg-ink-raised px-4 py-2.5 leading-relaxed text-paper">
+            <p className="max-w-[80%] rounded-surface rounded-br-panel bg-ink-raised px-4 py-2.5 leading-relaxed text-paper">
               {message.text}
             </p>
           </div>
@@ -126,20 +141,19 @@ export default function ChatThread({
               {message.text ? (
                 <>
                   <ReactMarkdown components={markdown}>{message.text}</ReactMarkdown>
-                  {/* Kursor stoji dok tekst pristiže. */}
                   {message.streaming && (
                     <span
-                      className="ml-0.5 inline-block h-4 w-[2px] animate-flap bg-amber align-middle"
+                      className="ml-0.5 inline-block h-[1.05em] w-[2px] animate-caret bg-amber align-text-bottom"
                       aria-hidden="true"
                     />
                   )}
                 </>
               ) : (
                 /* Pre prvog tokena prikazujemo u kojoj je fazi obrada. */
-                <div className="flex items-center gap-2 pt-1.5 font-mono text-xs text-mute">
-                  <span className="h-1.5 w-1.5 animate-flap rounded-full bg-amber" />
+                <p className="flex items-center gap-2 pt-1.5 font-mono text-xs text-mute">
+                  <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-amber" />
                   {stage ? STAGE_LABEL[stage] : 'obrađujem'}
-                </div>
+                </p>
               )}
 
               {!message.streaming && <SourceList sources={message.sources ?? []} />}

@@ -1,3 +1,41 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/**
+ * Smanjeno kretanje.
+ *
+ * Nije isto što i "bez animacija". Providnost i boja i dalje pomažu
+ * razumevanju — pokazuju da se nešto dešava, a ne pomeraju ništa po ekranu.
+ * Gasi se samo ono što se kreće.
+ *
+ * Globus i uvodni snimak imaju sopstvenu proveru u JavaScriptu, jer je
+ * njihovo kretanje deo logike, ne stila.
+ */
+@media (prefers-reduced-motion: reduce) {
+  /* Ulazak sadržaja gubi pomeraj, zadržava pojavljivanje. */
+  .animate-enter {
+    animation: none;
+    opacity: 1;
+  }
+
+  /* Sve tranzicije postaju trenutne, osim promene boje i providnosti. */
+  *,
+  *::before,
+  *::after {
+    transition-property: opacity, color, background-color, border-color;
+    transition-duration: 120ms;
+  }
+
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/**
+ * Prstenovi fokusa se crtaju samo pri navigaciji tastaturom.
+ * Klik mišem ih ne izaziva, što je ponašanje koje korisnici očekuju.
+ */
+:focus-visible {
+  outline-offset: 2px;
+}

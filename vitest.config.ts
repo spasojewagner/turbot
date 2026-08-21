@@ -1,5 +1,12 @@
 import { defineConfig } from 'vitest/config';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * `__dirname` ne postoji u ESM kontekstu, a Vite upozorava da će njegova
+ * emulacija prestati da radi. `import.meta.url` je zamena koja radi svuda.
+ */
+const here = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   test: {
@@ -13,7 +20,7 @@ export default defineConfig({
   resolve: {
     // Isti alias kao u tsconfig.json, inače testovi ne nalaze module.
     alias: {
-      '@': resolve(__dirname, './'),
+      '@': resolve(here, './'),
     },
   },
 });
