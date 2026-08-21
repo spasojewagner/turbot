@@ -1,3 +1,7 @@
+[![CI](https://github.com/spasojewagner/turbot/actions/workflows/ci.yml/badge.svg)](https://github.com/spasojewagner/turbot/actions)
+
+**[turbot-iota.vercel.app](https://turbot-iota.vercel.app)**
+
 # TurBot
 
 RAG asistent za pretragu cenovnika turističke agencije. Odgovara na pitanja o
