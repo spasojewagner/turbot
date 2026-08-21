@@ -17,17 +17,7 @@ export interface SourceRef {
   excerpt: string;
   score: number;
 }
-/**
- * Koliko fragmenata po dokumentu propustiti.
- *
- * Pitanje o jednoj destinaciji traži dubinu — tabela sa cenama, termini i
- * uslovi su u istom fajlu. Široko pitanje traži pokrivenost više cenovnika.
- * Zato granica zavisi od toga koliko je destinacija pomenuto.
- */
-export function perDocumentLimit(question: string): number {
-  const pogoci = question.match(DESTINACIJE);
-  return pogoci && pogoci.length <= 1 ? 4 : 2;
-}
+
 // ---------------------------------------------------------------------------
 // Metapodaci
 // ---------------------------------------------------------------------------
@@ -78,6 +68,31 @@ export function normalizeHistory(input: unknown, maxTurns = 12): [string, string
 }
 
 // ---------------------------------------------------------------------------
+// Prepoznavanje pojmova
+//
+// Alternative su namerno prefiksi ("termin", "hotel", "malt") i zato NEMA
+// zatvarajuće granice reči — sa `\b` na kraju bi "termini", "hotela" i
+// "Maltu" prestali da se poklapaju.
+// ---------------------------------------------------------------------------
+
+const POZDRAVI =
+  /^(zdravo|ćao|cao|hej|hi|hello|dobar dan|dobro jutro|dobro veče|dobro vece|hvala|pozdrav|važi|vazi|ok|okej|super)\b/i;
+
+/** Oblici opšteg znanja — pominju pojam, ali nemaju veze sa cenovnikom. */
+const OPSTE_ZNANJE =
+  /^(ko je|ko su|šta je|sta je|šta znači|sta znaci|gde se nalazi|kada je|zašto|zasto|koliko ima stanovnika|koji je glavni grad)/i;
+
+const PUTOVANJE =
+  /\b(cen[aeiu]|košta|kosta|aranžman|aranzman|termin|polaz|povrat|noćenj|nocenj|noći|noci|hotel|smeštaj|smestaj|avion|autobus|putovanj|ponud|doručak|dorucak|doplat|popust|taks|izlet|destinacij|rezervacij|osiguranj|prtljag|transfer|vodič|vodic|apartman|pansion)/i;
+
+const DESTINACIJE_IZVOR =
+  'rim|istanbul|malt|maroko|lisabon|porto|portugal|amsterdam|peterburg|bari|pulj|kairo|andaluzij|malag|škotsk|skotsk|englesk|francusk|pariz|ljubljan|švajcarsk|svajcarsk|ženev|zenev|bern|cirih|barselon|monako|milano|minhen|salcburg|trst|padov|španij|spanij|italij|grčk|grck|tursk|egipat|holandij|rusij|slovenij';
+
+const DESTINACIJE = new RegExp(`\\b(${DESTINACIJE_IZVOR})`, 'i');
+/** Ista lista sa globalnom zastavicom — za brojanje pogodaka. */
+const DESTINACIJE_SVE = new RegExp(`\\b(${DESTINACIJE_IZVOR})`, 'gi');
+
+// ---------------------------------------------------------------------------
 // Rezultati pretrage
 // ---------------------------------------------------------------------------
 
@@ -98,6 +113,23 @@ export function diversify(
   }
 
   return kept;
+}
+
+/**
+ * Koliko fragmenata po dokumentu propustiti.
+ *
+ * Pitanje o jednoj destinaciji traži dubinu — tabela sa cenama, termini i
+ * uslovi su u istom fajlu, često raštrkani kroz nekoliko fragmenata. Sa
+ * granicom od dva, cena je znala da bude odsečena.
+ *
+ * Široko pitanje ("aranžmani do 700 €") traži suprotno — pokrivenost više
+ * cenovnika, pa granica ostaje niska.
+ */
+export function perDocumentLimit(question: string): number {
+  const pogoci = question.match(DESTINACIJE_SVE) ?? [];
+  const jedinstvene = new Set(pogoci.map((p) => p.toLowerCase()));
+
+  return jedinstvene.size === 1 ? 4 : 2;
 }
 
 export function formatDocuments(
@@ -130,45 +162,29 @@ export function formatDocuments(
 // Brzi ruter
 // ---------------------------------------------------------------------------
 
-const POZDRAVI =
-  /^(zdravo|ćao|cao|hej|hi|hello|dobar dan|dobro jutro|dobro veče|dobro vece|hvala|pozdrav|važi|vazi|ok|okej|super)\b/i;
-
-/** Reči koje se javljaju u pitanjima o cenovniku. */
-const PUTOVANJE =
-  /\b(cen[aeiu]|košta|kosta|aranžman|aranzman|termin|polaz|povrat|noćenj|nocenj|noći|noci|hotel|smeštaj|smestaj|avion|autobus|let[oa]?v?|putovanj|ponud|doručak|dorucak|doplat|popust|taks|izlet|destinacij|rezervacij|osiguranj|prtljag|transfer|vodič|vodic|apartman|polupansion|pansion)\b/i;
-
-/**
- * Destinacije koje se javljaju u korpusu.
- *
- * Ako pitanje pominje neku od njih, samostalno je — nije nastavak koji traži
- * razrešavanje zamenica, pa se poziv ruteru može preskočiti.
- */
-const DESTINACIJE =
-  /\b(rim|istanbul|malta|maroko|lisabon|porto|portugal|amsterdam|peterburg|bari|pulj|kairo|nil[ua]?|andaluzij|malag|škotsk|skotsk|englesk|francusk|pariz|ljubljan|švajcarsk|svajcarsk|ženev|zenev|bern|cirih|barselon|monako|milano|minhen|salcburg|trst|padov|španij|spanij|italij|grčk|grck|tursk|egipat|holandij|rusij|slovenij|koimbr|braga|sintr)\b/i;
-
 /**
  * Klasifikacija bez poziva modelu, kada je ishod nedvosmislen.
  *
- * Ruter je najskuplji deo lanca posle samog odgovora — na free tieru sa
+ * Ruter je posle samog odgovora najskuplji deo lanca — na free tieru sa
  * dvadeset zahteva dnevno, dva poziva po pitanju znače sedam pitanja umesto
- * dvadeset. Ova heuristika hvata većinu stvarnih pitanja.
+ * dvadeset.
  *
  * Vraća `null` kada nije sigurna, i tada se poziva model.
  */
 export function quickRoute(question: string, hasHistory: boolean): Intent | null {
   const q = question.trim();
 
-  // Pozdrav ili zahvala — kratko i prepoznatljivo.
   if (q.length < 40 && POZDRAVI.test(q)) return 'razgovor';
+
+  // "Ko je predsednik Francuske" pominje destinaciju, a nije pitanje o
+  // cenovniku. Takve oblike prepuštamo modelu.
+  if (OPSTE_ZNANJE.test(q)) return null;
 
   const pominjeDestinaciju = DESTINACIJE.test(q);
   const pominjePutovanje = PUTOVANJE.test(q);
 
-  if (!pominjeDestinaciju && !pominjePutovanje) {
-    // Nema nijednog signala — može biti van teme, može biti nastavak.
-    // Odluku prepuštamo modelu.
-    return null;
-  }
+  // Nijedan signal — može biti van teme, može biti nastavak.
+  if (!pominjeDestinaciju && !pominjePutovanje) return null;
 
   // Bez istorije nastavak nije moguć.
   if (!hasHistory) return 'cenovnik';

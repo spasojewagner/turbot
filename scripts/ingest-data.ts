@@ -5,7 +5,6 @@ import { pathToFileURL } from 'node:url';
 
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
-import { PineconeStore } from '@langchain/pinecone';
 import { Document } from '@langchain/core/documents';
 import { Pinecone } from '@pinecone-database/pinecone';
 
@@ -24,20 +23,27 @@ const SOURCE_DIR = process.env.INGEST_SOURCE_DIR ?? 'docs';
  * Veličina fragmenta.
  *
  * Ranijih 800 znakova je sekao tabele sa cenama na pola, pa je cena završavala
- * u jednom fragmentu a termin i naziv hotela u drugom — model je onda dobijao
- * broj bez konteksta. 1400 sa preklapanjem od 250 drži tabelarni red na okupu.
+ * u jednom fragmentu a naziv hotela i termin u drugom.
  */
 const CHUNK_SIZE = Number(process.env.CHUNK_SIZE ?? 1400);
 const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP ?? 250);
 
 const BATCH_SIZE = 2;
-const BATCH_DELAY_MS = 5_000;
+const BATCH_DELAY_MS = 12_000;
 const RATE_LIMIT_BACKOFF_MS = 60_000;
+const MAX_RETRIES = 3;
 
 /** Fajl koji proizvodi `npm run ocr` za skenirane PDF-ove. */
 const OCR_SUFFIX = '.ocr.txt';
 
+/** Dopunjavanje postojećeg indeksa umesto punjenja praznog. */
+const APPEND = process.argv.includes('--append');
+
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---------------------------------------------------------------------------
+// Pomoćne funkcije
+// ---------------------------------------------------------------------------
 
 function buildChunkId(doc: Document, position: number): string {
   const source =
@@ -56,6 +62,21 @@ function isRateLimitError(message: string): boolean {
     message.includes('quota')
   );
 }
+
+/** Čitljiv naziv aranžmana iz imena fajla. */
+function toTitle(filename: string): string {
+  return filename
+    .replace(/\.ocr\.txt$/i, '')
+    .replace(/\.pdf$/i, '')
+    .replace(/\s*\(kliknuti za prikaz\)\s*/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
+// Učitavanje
+// ---------------------------------------------------------------------------
 
 /**
  * Učitava jedan PDF, ili njegov OCR prepis ako postoji.
@@ -95,51 +116,126 @@ async function loadDocument(file: string): Promise<Document[]> {
   );
 }
 
-function enrichMetadata(docs: Document[]): Document[] {
-  return docs.map((doc, index) => {
-    const source =
-      typeof doc.metadata?.source === 'string' ? doc.metadata.source : 'unknown';
+/**
+ * Dodaje naziv aranžmana na početak svakog fragmenta.
+ *
+ * Tabele sa cenama su nizovi brojeva i oznaka ("HOTEL 3*** / 549€") koji
+ * semantički ne liče ni na jedno pitanje. Bez ovog zaglavlja takav fragment
+ * nikada ne pobedi prozni opis uslova, iako sadrži traženi odgovor.
+ */
+function enrichDocuments(docs: Document[]): Document[] {
+  return docs
+    .map((doc, index) => {
+      const source =
+        typeof doc.metadata?.source === 'string' ? doc.metadata.source : 'unknown';
+      const filename = basename(source);
+      const title = toTitle(filename);
+      const body = doc.pageContent.trim();
 
-    return new Document({
-      pageContent: doc.pageContent,
-      metadata: {
-        ...doc.metadata,
-        source,
-        filename: basename(source),
-        chunkIndex: index,
-      },
-    });
-  });
+      return new Document({
+        pageContent: title ? `${title}\n\n${body}` : body,
+        metadata: {
+          ...doc.metadata,
+          source,
+          filename,
+          title,
+          chunkIndex: index,
+        },
+      });
+    })
+    // Prazan fragment daje prazan vektor, koji Pinecone odbija.
+    .filter((doc) => doc.pageContent.trim().length > 0);
 }
 
-async function upsertInBatches(store: PineconeStore, docs: Document[]): Promise<void> {
+// ---------------------------------------------------------------------------
+// Upis
+// ---------------------------------------------------------------------------
+
+/**
+ * Vektori se prave preko `embedQuery`, ne `embedDocuments`.
+ *
+ * Verzija @langchain/google-genai koju koristimo ne parsira odgovor
+ * `batchEmbedContents` endpointa za gemini-embedding-001 — vraća prazne
+ * nizove bez ikakve greške, pa Pinecone dobija vektor dimenzije nula.
+ * `embedQuery` ide na drugi endpoint i radi ispravno.
+ */
+async function embedBatch(
+  embeddings: GoogleGenerativeAIEmbeddings,
+  batch: Document[],
+): Promise<number[][]> {
+  const vectors = await Promise.all(
+    batch.map((doc) => embeddings.embedQuery(doc.pageContent)),
+  );
+
+  const prazni = vectors.filter((v) => !Array.isArray(v) || v.length === 0).length;
+  if (prazni > 0) {
+    throw new Error(`Embedding je vratio ${prazni} praznih vektora`);
+  }
+
+  return vectors;
+}
+
+async function upsertInBatches(
+  index: ReturnType<Pinecone['Index']>,
+  embeddings: GoogleGenerativeAIEmbeddings,
+  docs: Document[],
+): Promise<void> {
   const totalBatches = Math.ceil(docs.length / BATCH_SIZE);
   console.log(`\nUpisujem ${docs.length} fragmenata u ${totalBatches} batch-eva`);
+
+  const namespace = index.namespace(PINECONE_NAME_SPACE);
 
   for (let i = 0; i < docs.length; i += BATCH_SIZE) {
     const batch = docs.slice(i, i + BATCH_SIZE);
     const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-    const ids = batch.map((doc, offset) => buildChunkId(doc, i + offset));
 
-    try {
-      await store.addDocuments(batch, { ids });
-      console.log(`  batch ${batchNumber}/${totalBatches}`);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`  greška u batch-u ${batchNumber}: ${message}`);
+    let attempt = 0;
 
-      if (!isRateLimitError(message)) throw err;
+    while (true) {
+      try {
+        const vectors = await embedBatch(embeddings, batch);
 
-      console.warn(`  rate limit — čekam ${RATE_LIMIT_BACKOFF_MS / 1000}s`);
-      await delay(RATE_LIMIT_BACKOFF_MS);
+        await namespace.upsert(
+          batch.map((doc, offset) => ({
+            id: buildChunkId(doc, i + offset),
+            values: vectors[offset],
+            metadata: {
+              // Ključ mora biti `text` — chat.ts čita sa textKey: 'text'.
+              text: doc.pageContent,
+              source: String(doc.metadata.source ?? ''),
+              filename: String(doc.metadata.filename ?? ''),
+              title: String(doc.metadata.title ?? ''),
+              extraction: String(doc.metadata.extraction ?? 'pdf'),
+            },
+          })),
+        );
 
-      await store.addDocuments(batch, { ids });
-      console.log(`  batch ${batchNumber}/${totalBatches} iz drugog pokušaja`);
+        console.log(`  batch ${batchNumber}/${totalBatches}`);
+        break;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        attempt += 1;
+
+        if (!isRateLimitError(message) || attempt > MAX_RETRIES) {
+          console.error(`  batch ${batchNumber} neuspešan: ${message}`);
+          throw err;
+        }
+
+        console.warn(
+          `  batch ${batchNumber} — rate limit, čekam ${RATE_LIMIT_BACKOFF_MS / 1000}s ` +
+            `(pokušaj ${attempt}/${MAX_RETRIES})`,
+        );
+        await delay(RATE_LIMIT_BACKOFF_MS);
+      }
     }
 
     if (i + BATCH_SIZE < docs.length) await delay(BATCH_DELAY_MS);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Glavni tok
+// ---------------------------------------------------------------------------
 
 export async function runIngestion(): Promise<void> {
   const files = readdirSync(SOURCE_DIR).filter((f) => f.toLowerCase().endsWith('.pdf'));
@@ -171,7 +267,7 @@ export async function runIngestion(): Promise<void> {
     chunkOverlap: CHUNK_OVERLAP,
   });
 
-  const docs = enrichMetadata(await splitter.splitDocuments(rawDocs));
+  const docs = enrichDocuments(await splitter.splitDocuments(rawDocs));
   console.log(`Podeljeno u ${docs.length} fragmenata (chunk ${CHUNK_SIZE}/${CHUNK_OVERLAP})`);
 
   if (docs.length === 0) {
@@ -190,16 +286,28 @@ export async function runIngestion(): Promise<void> {
   const index = pineconeClient.Index(PINECONE_INDEX_NAME_OVERRIDE);
 
   const before = await index.describeIndexStats();
-  console.log(`\nIndeks pre upisa: ${before.totalRecordCount ?? 0} vektora`);
+  const existing = before.totalRecordCount ?? 0;
 
-  const store = await PineconeStore.fromExistingIndex(embeddings, {
-    // TODO: ukloniti `as any` nakon usklađivanja verzija Pinecone paketa.
-    pineconeIndex: index as any,
-    namespace: PINECONE_NAME_SPACE,
-    textKey: 'text',
-  });
+  console.log(`\nIndeks pre upisa: ${existing} vektora`);
 
-  await upsertInBatches(store, docs);
+  /**
+   * Zaštita od tihih duplikata.
+   *
+   * ID fragmenta je heš njegovog sadržaja. Ako se promeni chunkovanje ili
+   * način obrade teksta, novi fragmenti neće prepisati stare nego će se
+   * dodati pored njih — i indeks tiho dobije dve verzije istog dokumenta.
+   */
+  if (existing > 0 && !APPEND) {
+    console.error(
+      '\nIndeks nije prazan. Ingestija bi napravila duplikate ako se chunkovanje\n' +
+        'ili obrada teksta promenila od poslednjeg puta.\n\n' +
+        'Obriši indeks u Pinecone konzoli i napravi nov, ili pokreni sa --append\n' +
+        'ako namerno dopunjavaš postojeći sadržaj.',
+    );
+    process.exit(1);
+  }
+
+  await upsertInBatches(index, embeddings, docs);
 
   const after = await index.describeIndexStats();
   console.log(`\nIndeks posle upisa: ${after.totalRecordCount ?? 0} vektora`);
@@ -208,10 +316,7 @@ export async function runIngestion(): Promise<void> {
 
 export const run = runIngestion;
 
-/**
- * Pokreće se samo kada je fajl direktno pozvan iz komandne linije.
- * Ranije je na dnu stajao IIFE koji je kretao pri svakom importu modula.
- */
+/** Pokreće se samo kada je fajl direktno pozvan iz komandne linije. */
 const isDirectRun =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
