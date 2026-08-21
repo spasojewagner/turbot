@@ -8,25 +8,8 @@ import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { Document } from '@langchain/core/documents';
 import { Pinecone } from '@pinecone-database/pinecone';
 
+import { env } from '@/lib/env';
 import { CustomPDFLoader } from '@/utils/customPDFLoader';
-import { PINECONE_NAME_SPACE } from '@/config/pinecone';
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const PINECONE_API_KEY = process.env.PINECONE_API_KEY!;
-const PINECONE_INDEX_NAME_OVERRIDE = process.env.PINECONE_INDEX_NAME!;
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? 'gemini-embedding-001';
-
-/** TODO(faza #6): zameniti object storage-om, obrisati docs/ iz repoa. */
-const SOURCE_DIR = process.env.INGEST_SOURCE_DIR ?? 'docs';
-
-/**
- * Veličina fragmenta.
- *
- * Ranijih 800 znakova je sekao tabele sa cenama na pola, pa je cena završavala
- * u jednom fragmentu a naziv hotela i termin u drugom.
- */
-const CHUNK_SIZE = Number(process.env.CHUNK_SIZE ?? 1400);
-const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP ?? 250);
 
 const BATCH_SIZE = 2;
 const BATCH_DELAY_MS = 12_000;
@@ -45,6 +28,13 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // Pomoćne funkcije
 // ---------------------------------------------------------------------------
 
+/**
+ * ID fragmenta je heš izvora, pozicije i sadržaja.
+ *
+ * Zbog toga je ponovljena ingestija idempotentna — isti sadržaj prepisuje
+ * isti zapis umesto da pravi duplikat. To ujedno znači da se prekinuta
+ * ingestija nastavlja sa `--append` bez posledica.
+ */
 function buildChunkId(doc: Document, position: number): string {
   const source =
     typeof doc.metadata?.source === 'string' ? doc.metadata.source : 'unknown';
@@ -63,7 +53,6 @@ function isRateLimitError(message: string): boolean {
   );
 }
 
-/** Čitljiv naziv aranžmana iz imena fajla. */
 function toTitle(filename: string): string {
   return filename
     .replace(/\.ocr\.txt$/i, '')
@@ -82,11 +71,10 @@ function toTitle(filename: string): string {
  * Učitava jedan PDF, ili njegov OCR prepis ako postoji.
  *
  * Skenirani cenovnici nemaju tekstualni sloj — `pdf-parse` iz njih izvuče
- * po nekoliko znakova. Za njih `npm run ocr` unapred napravi `.ocr.txt`,
- * i taj sadržaj ima prednost.
+ * po nekoliko znakova. Za njih `npm run ocr` unapred napravi `.ocr.txt`.
  */
 async function loadDocument(file: string): Promise<Document[]> {
-  const pdfPath = join(SOURCE_DIR, file);
+  const pdfPath = join(env.INGEST_SOURCE_DIR, file);
   const ocrPath = pdfPath.replace(/\.pdf$/i, OCR_SUFFIX);
 
   if (existsSync(ocrPath)) {
@@ -134,13 +122,7 @@ function enrichDocuments(docs: Document[]): Document[] {
 
       return new Document({
         pageContent: title ? `${title}\n\n${body}` : body,
-        metadata: {
-          ...doc.metadata,
-          source,
-          filename,
-          title,
-          chunkIndex: index,
-        },
+        metadata: { ...doc.metadata, source, filename, title, chunkIndex: index },
       });
     })
     // Prazan fragment daje prazan vektor, koji Pinecone odbija.
@@ -157,7 +139,6 @@ function enrichDocuments(docs: Document[]): Document[] {
  * Verzija @langchain/google-genai koju koristimo ne parsira odgovor
  * `batchEmbedContents` endpointa za gemini-embedding-001 — vraća prazne
  * nizove bez ikakve greške, pa Pinecone dobija vektor dimenzije nula.
- * `embedQuery` ide na drugi endpoint i radi ispravno.
  */
 async function embedBatch(
   embeddings: GoogleGenerativeAIEmbeddings,
@@ -183,7 +164,7 @@ async function upsertInBatches(
   const totalBatches = Math.ceil(docs.length / BATCH_SIZE);
   console.log(`\nUpisujem ${docs.length} fragmenata u ${totalBatches} batch-eva`);
 
-  const namespace = index.namespace(PINECONE_NAME_SPACE);
+  const namespace = index.namespace(env.PINECONE_NAMESPACE);
 
   for (let i = 0; i < docs.length; i += BATCH_SIZE) {
     const batch = docs.slice(i, i + BATCH_SIZE);
@@ -238,9 +219,11 @@ async function upsertInBatches(
 // ---------------------------------------------------------------------------
 
 export async function runIngestion(): Promise<void> {
-  const files = readdirSync(SOURCE_DIR).filter((f) => f.toLowerCase().endsWith('.pdf'));
+  const files = readdirSync(env.INGEST_SOURCE_DIR).filter((f) =>
+    f.toLowerCase().endsWith('.pdf'),
+  );
 
-  console.log(`Učitavam ${files.length} dokumenata iz "${SOURCE_DIR}"...\n`);
+  console.log(`Učitavam ${files.length} dokumenata iz "${env.INGEST_SOURCE_DIR}"...\n`);
 
   const rawDocs: Document[] = [];
   let ocrCount = 0;
@@ -263,12 +246,14 @@ export async function runIngestion(): Promise<void> {
   console.log(`\nUčitano ${rawDocs.length} dokumenata (${ocrCount} preko OCR-a)`);
 
   const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize: CHUNK_SIZE,
-    chunkOverlap: CHUNK_OVERLAP,
+    chunkSize: env.CHUNK_SIZE,
+    chunkOverlap: env.CHUNK_OVERLAP,
   });
 
   const docs = enrichDocuments(await splitter.splitDocuments(rawDocs));
-  console.log(`Podeljeno u ${docs.length} fragmenata (chunk ${CHUNK_SIZE}/${CHUNK_OVERLAP})`);
+  console.log(
+    `Podeljeno u ${docs.length} fragmenata (chunk ${env.CHUNK_SIZE}/${env.CHUNK_OVERLAP})`,
+  );
 
   if (docs.length === 0) {
     console.error('Nema fragmenata nakon podele — prekidam.');
@@ -276,14 +261,14 @@ export async function runIngestion(): Promise<void> {
   }
 
   const embeddings = new GoogleGenerativeAIEmbeddings({
-    apiKey: GEMINI_API_KEY,
-    model: EMBEDDING_MODEL,
+    apiKey: env.GEMINI_API_KEY,
+    model: env.EMBEDDING_MODEL,
     maxRetries: 5,
     maxConcurrency: 2,
   });
 
-  const pineconeClient = new Pinecone({ apiKey: PINECONE_API_KEY });
-  const index = pineconeClient.Index(PINECONE_INDEX_NAME_OVERRIDE);
+  const pineconeClient = new Pinecone({ apiKey: env.PINECONE_API_KEY });
+  const index = pineconeClient.Index(env.PINECONE_INDEX_NAME);
 
   const before = await index.describeIndexStats();
   const existing = before.totalRecordCount ?? 0;

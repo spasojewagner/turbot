@@ -3,13 +3,14 @@ import { PromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { Document } from '@langchain/core/documents';
 
+import { env } from '@/lib/env';
 import {
   diversify,
   formatDocuments,
   parseRouterResponse,
+  perDocumentLimit,
   quickRoute,
   renderTurns,
-  perDocumentLimit,
   type Intent,
   type SourceRef,
 } from '@/lib/rag/format';
@@ -17,22 +18,15 @@ import {
 // Re-eksport da pages/api/chat.ts ne mora da zna za lib sloj.
 export type { Intent, SourceRef };
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-
-export const CHAT_MODEL = process.env.CHAT_MODEL ?? 'gemini-3.6-flash';
-export const UTILITY_MODEL =
-  process.env.UTILITY_MODEL ?? 'gemini-3.1-flash-lite';
+export const CHAT_MODEL = env.CHAT_MODEL;
+export const UTILITY_MODEL = env.UTILITY_MODEL;
 
 const MAX_CONTEXT_CHARS = 14_000;
+/** Koliko poslednjih razmena ide doslovno. Starije se sažimaju. */
 const VERBATIM_TURNS = 5;
 const MAX_TURN_CHARS = 700;
-const MAX_PER_DOCUMENT = 2;
-const RELEVANCE_FLOOR = Number(process.env.RELEVANCE_FLOOR ?? 0.62);
 
-export type SearchFn = (
-  query: string,
-  k: number,
-) => Promise<[Document, number][]>;
+export type SearchFn = (query: string, k: number) => Promise<[Document, number][]>;
 
 /** Faza obrade — klijent je prikazuje dok čeka prvi token. */
 export type Stage = 'razumevanje' | 'pretraga' | 'sastavljanje';
@@ -111,47 +105,49 @@ Sažetak:`);
 
 // ---------------------------------------------------------------------------
 // Modeli
+//
+// Budžeti tokena su namerno velikodušni: Gemini 3.x troši deo izlaza na
+// interno rezonovanje pre nego što išta ispiše. Sa 300 tokena odgovor je
+// stizao prekinut usred rečenice.
 // ---------------------------------------------------------------------------
 
 const answerLLM = new ChatGoogleGenerativeAI({
-  apiKey: GEMINI_API_KEY,
-  model: CHAT_MODEL,
+  apiKey: env.GEMINI_API_KEY,
+  model: env.CHAT_MODEL,
   temperature: 0.1,
   maxRetries: 2,
   maxOutputTokens: 8192,
 });
 
 const asideLLM = new ChatGoogleGenerativeAI({
-  apiKey: GEMINI_API_KEY,
-  model: UTILITY_MODEL,
+  apiKey: env.GEMINI_API_KEY,
+  model: env.UTILITY_MODEL,
   temperature: 0.3,
   maxRetries: 1,
   maxOutputTokens: 2048,
 });
 
 const utilityLLM = new ChatGoogleGenerativeAI({
-  apiKey: GEMINI_API_KEY,
-  model: UTILITY_MODEL,
+  apiKey: env.GEMINI_API_KEY,
+  model: env.UTILITY_MODEL,
   temperature: 0,
   maxRetries: 1,
   maxOutputTokens: 2048,
 });
 
-const routerChain = ROUTER_PROMPT.pipe(utilityLLM).pipe(
-  new StringOutputParser(),
-);
-const summaryChain = SUMMARY_PROMPT.pipe(utilityLLM).pipe(
-  new StringOutputParser(),
-);
-const answerChain = ANSWER_PROMPT.pipe(answerLLM).pipe(
-  new StringOutputParser(),
-);
+const routerChain = ROUTER_PROMPT.pipe(utilityLLM).pipe(new StringOutputParser());
+const summaryChain = SUMMARY_PROMPT.pipe(utilityLLM).pipe(new StringOutputParser());
+const answerChain = ANSWER_PROMPT.pipe(answerLLM).pipe(new StringOutputParser());
 const asideChain = ASIDE_PROMPT.pipe(asideLLM).pipe(new StringOutputParser());
 
 // ---------------------------------------------------------------------------
 // Istorija i rutiranje
 // ---------------------------------------------------------------------------
 
+/**
+ * Poslednjih nekoliko razmena ide doslovno, sve pre toga u sažetak.
+ * Bez toga duži razgovor ili preplavi kontekst ili se tiho odseca.
+ */
 async function buildHistory(history: [string, string][]): Promise<string> {
   if (!history?.length) return '';
 
@@ -205,14 +201,13 @@ async function route(
  *
  * Streaming je ovde više od kozmetike: ruter i pretraga zajedno traju
  * nekoliko sekundi pre nego što model počne da piše, pa bi bez statusa
- * korisnik gledao u prazno. Ovako vidi u kojoj je fazi, a odgovor se
- * ispisuje dok nastaje.
+ * korisnik gledao u prazno.
  */
 export async function* streamAnswer({
   question,
   history = [],
   search,
-  k = 12,
+  k = env.RETRIEVAL_K,
   signal,
 }: {
   question: string;
@@ -237,6 +232,7 @@ export async function* streamAnswer({
       historyBlock,
       history.length > 0,
     );
+    mark('router', t0);
 
     // Ćaskanje i pitanja van teme ne diraju vektorsku bazu.
     if (intent === 'razgovor' || intent === 'van_teme') {
@@ -259,7 +255,7 @@ export async function* streamAnswer({
         debug: {
           intent,
           standaloneQuestion: question,
-          model: UTILITY_MODEL,
+          model: env.UTILITY_MODEL,
           timings,
           total: Date.now() - started,
         },
@@ -274,9 +270,11 @@ export async function* streamAnswer({
     mark('search', t2);
 
     const topScore = scored.length > 0 ? scored[0][1] : null;
+    const limit = perDocumentLimit(standaloneQuestion);
+
     const relevant = diversify(
-      scored.filter(([, score]) => score >= RELEVANCE_FLOOR),
-      perDocumentLimit(standaloneQuestion),
+      scored.filter(([, score]) => score >= env.RELEVANCE_FLOOR),
+      limit,
     );
 
     if (relevant.length === 0) {
@@ -288,13 +286,7 @@ export async function* streamAnswer({
       };
       yield {
         type: 'done',
-        debug: {
-          intent,
-          standaloneQuestion,
-          topScore,
-          sourcesKept: 0,
-          timings,
-        },
+        debug: { intent, standaloneQuestion, topScore, sourcesKept: 0, timings },
       };
       return;
     }
@@ -324,8 +316,9 @@ export async function* streamAnswer({
         intent,
         standaloneQuestion,
         topScore,
+        perDocumentLimit: limit,
         sourcesKept: sources.length,
-        model: CHAT_MODEL,
+        model: env.CHAT_MODEL,
         timings,
         total: Date.now() - started,
       },
