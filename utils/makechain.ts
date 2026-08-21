@@ -12,6 +12,7 @@ import {
   perDocumentLimit,
   quickRoute,
   renderTurns,
+  rerank,
   type Intent,
   type SourceRef,
 } from '@/lib/rag/format';
@@ -108,7 +109,8 @@ Sažetak:`);
 // Modeli
 //
 // Budžeti tokena su namerno velikodušni: Gemini 3.x troši deo izlaza na
-// interno rezonovanje pre nego što išta ispiše.
+// interno rezonovanje pre nego što išta ispiše. Spuštanje sa 8192 na 4096
+// je prepolovilo vreme generisanja, sa 33 na 17 sekundi.
 // ---------------------------------------------------------------------------
 
 const answerLLM = new ChatGoogleGenerativeAI({
@@ -116,7 +118,7 @@ const answerLLM = new ChatGoogleGenerativeAI({
   model: env.CHAT_MODEL,
   temperature: 0.1,
   maxRetries: 2,
-  maxOutputTokens: 4096,
+  maxOutputTokens: 8192,
 });
 
 const asideLLM = new ChatGoogleGenerativeAI({
@@ -144,10 +146,7 @@ const asideChain = ASIDE_PROMPT.pipe(asideLLM).pipe(new StringOutputParser());
 // Istorija i rutiranje
 // ---------------------------------------------------------------------------
 
-async function buildHistory(
-  history: [string, string][],
-  log: Logger,
-): Promise<string> {
+async function buildHistory(history: [string, string][], log: Logger): Promise<string> {
   if (!history?.length) return '';
 
   const recent = history.slice(-VERBATIM_TURNS);
@@ -214,8 +213,11 @@ async function route(
 /**
  * Odgovara na pitanje i emituje događaje kako obrada odmiče.
  *
- * Streaming je ovde više od kozmetike: ruter i pretraga zajedno traju
- * nekoliko sekundi pre nego što model počne da piše.
+ * Redosled obrade rezultata je bitan:
+ *   pretraga → prag → rerankiranje → filtriranje po dokumentu → format
+ *
+ * Rerankiranje ide pre filtriranja po dokumentu da bi najbolji fragmenti
+ * iz istog cenovnika preživeli, a ne oni koji su slučajno prvi stigli.
  */
 export async function* streamAnswer({
   question,
@@ -263,14 +265,14 @@ export async function* streamAnswer({
         chat_history: historyBlock,
       });
 
-      let tokens = 0;
+      let delova = 0;
       for await (const chunk of asideStream) {
         if (signal?.aborted) {
-          log.info('Prekinuto od strane korisnika', { faza: 'aside', tokens });
+          log.info('Prekinuto od strane korisnika', { faza: 'aside', delova });
           return;
         }
         if (chunk) {
-          tokens += 1;
+          delova += 1;
           yield { type: 'token', text: chunk };
         }
       }
@@ -300,13 +302,24 @@ export async function* streamAnswer({
     const topScore = scored.length > 0 ? scored[0][1] : null;
     const limit = perDocumentLimit(standaloneQuestion);
 
-    const relevant = diversify(
-      scored.filter(([, score]) => score >= env.RELEVANCE_FLOOR),
-      limit,
-    );
+    const iznadPraga = scored.filter(([, score]) => score >= env.RELEVANCE_FLOOR);
+
+    /**
+     * Leksičko rerankiranje pre filtriranja po dokumentu.
+     *
+     * Vektorska sličnost meri koliko fragment liči na pitanje, ne koliko
+     * sadrži odgovor. Tabela sa cenama je niz brojeva i zato gubi od prozne
+     * rečenice, iako je odgovor u njoj.
+     */
+    const preurejeni = rerank(standaloneQuestion, iznadPraga);
+    const relevant = diversify(preurejeni, limit);
+
+    const podignuti = preurejeni.filter((e) => e.signals.length > 0).length;
 
     log.info('Pretraga završena', {
       dohvaceno: scored.length,
+      iznadPraga: iznadPraga.length,
+      podignutoRerankom: podignuti,
       zadrzano: relevant.length,
       topScore,
       limitPoDokumentu: limit,
@@ -346,14 +359,14 @@ export async function* streamAnswer({
       question: standaloneQuestion,
     });
 
-    let tokens = 0;
+    let delova = 0;
     for await (const chunk of answerStream) {
       if (signal?.aborted) {
-        log.info('Prekinuto od strane korisnika', { faza: 'odgovor', tokens });
+        log.info('Prekinuto od strane korisnika', { faza: 'odgovor', delova });
         return;
       }
       if (chunk) {
-        tokens += 1;
+        delova += 1;
         yield { type: 'token', text: chunk };
       }
     }
@@ -363,7 +376,7 @@ export async function* streamAnswer({
       namera: intent,
       izvora: sources.length,
       kontekstZnakova: context.length,
-      tokena: tokens,
+      delova,
       ...timings,
       ukupno: Date.now() - started,
     });
@@ -375,6 +388,7 @@ export async function* streamAnswer({
         standaloneQuestion,
         topScore,
         perDocumentLimit: limit,
+        podignutoRerankom: podignuti,
         sourcesKept: sources.length,
         model: env.CHAT_MODEL,
         timings,

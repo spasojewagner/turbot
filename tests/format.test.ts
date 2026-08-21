@@ -9,12 +9,22 @@ import {
   parseRouterResponse,
   perDocumentLimit,
   quickRoute,
+  rerank,
   renderTurns,
   toLabel,
+  type RerankedEntry,
 } from '@/lib/rag/format';
 
 const doc = (filename: string, content = 'sadržaj') =>
   new Document({ pageContent: content, metadata: { filename } });
+
+/** Pomoćnik: pravi RerankedEntry bez prolaska kroz rerank. */
+const entry = (filename: string, content = 'sadržaj', score = 0.8): RerankedEntry => ({
+  doc: doc(filename, content),
+  vectorScore: score,
+  finalScore: score,
+  signals: [],
+});
 
 // ---------------------------------------------------------------------------
 
@@ -102,39 +112,101 @@ describe('renderTurns', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('diversify', () => {
-  it('ograničava broj fragmenata po dokumentu', () => {
+describe('rerank', () => {
+  it('podiže fragment sa cenom kada se pita za cenu', () => {
     const scored: [Document, number][] = [
-      [doc('Malta.pdf'), 0.9],
-      [doc('Malta.pdf'), 0.88],
-      [doc('Malta.pdf'), 0.87],
-      [doc('Rim.pdf'), 0.86],
+      [doc('a.pdf', 'Program obuhvata razgledanje grada uz vodiča.'), 0.80],
+      [doc('b.pdf', 'HOTEL 3*** redovna cena 549€ snižena 499€'), 0.75],
     ];
 
-    const result = diversify(scored, 2);
+    const result = rerank('Koliko košta Rim?', scored);
+
+    expect(getFilename(result[0].doc)).toBe('b.pdf');
+    expect(result[0].signals).toContain('cena');
+    expect(result[0].finalScore).toBeCloseTo(0.81, 5);
+  });
+
+  it('ne dira poredak kada pitanje ne traži cenu', () => {
+    const scored: [Document, number][] = [
+      [doc('a.pdf', 'Program obuhvata razgledanje grada.'), 0.8],
+      [doc('b.pdf', 'HOTEL 3*** cena 549€'), 0.75],
+    ];
+
+    const result = rerank('Šta se obilazi u programu?', scored);
+    expect(getFilename(result[0].doc)).toBe('a.pdf');
+  });
+
+  it('podiže fragment sa datumom kada se pita za termin', () => {
+    const scored: [Document, number][] = [
+      [doc('a.pdf', 'Smeštaj u hotelu sa tri zvezdice.'), 0.80],
+      [doc('b.pdf', 'Polazak 02.05.2025. povratak 05.05.2025.'), 0.76],
+    ];
+
+    const result = rerank('Koji su termini polaska?', scored);
+    expect(getFilename(result[0].doc)).toBe('b.pdf');
+    expect(result[0].signals).toContain('datum');
+  });
+
+  it('sabira više signala', () => {
+    const bogat = 'Termin 02.05.2025 — cena 699€ — u cenu je uključen prevoz';
+    const scored: [Document, number][] = [[doc('a.pdf', bogat), 0.7]];
+
+    const result = rerank('Koliko košta i koji je termin, šta je uključeno?', scored);
+    expect(result[0].signals).toHaveLength(3);
+    expect(result[0].finalScore).toBeCloseTo(0.88, 5);
+  });
+
+  it('čuva originalni skor odvojeno od konačnog', () => {
+    const scored: [Document, number][] = [[doc('a.pdf', 'cena 499€'), 0.7]];
+    const result = rerank('koliko košta', scored);
+
+    expect(result[0].vectorScore).toBe(0.7);
+    expect(result[0].finalScore).toBeGreaterThan(0.7);
+  });
+
+  it('zadržava redosled pretrage pri jednakom skoru', () => {
+    const scored: [Document, number][] = [
+      [doc('prvi.pdf', 'tekst'), 0.8],
+      [doc('drugi.pdf', 'tekst'), 0.8],
+    ];
+
+    const result = rerank('nešto neutralno', scored);
+    expect(result.map((r) => getFilename(r.doc))).toEqual(['prvi.pdf', 'drugi.pdf']);
+  });
+
+  it('ne ruši se na praznom nizu', () => {
+    expect(rerank('bilo šta', [])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('diversify', () => {
+  it('ograničava broj fragmenata po dokumentu', () => {
+    const entries = [
+      entry('Malta.pdf', 'a', 0.9),
+      entry('Malta.pdf', 'b', 0.88),
+      entry('Malta.pdf', 'c', 0.87),
+      entry('Rim.pdf', 'd', 0.86),
+    ];
+
+    const result = diversify(entries, 2);
     expect(result).toHaveLength(3);
-    expect(result.map(([d]) => getFilename(d))).toEqual([
+    expect(result.map((r) => getFilename(r.doc))).toEqual([
       'Malta.pdf',
       'Malta.pdf',
       'Rim.pdf',
     ]);
   });
 
-  it('čuva redosled po skoru', () => {
-    const scored: [Document, number][] = [
-      [doc('a.pdf'), 0.9],
-      [doc('b.pdf'), 0.8],
-      [doc('c.pdf'), 0.7],
-    ];
-    expect(diversify(scored, 1).map(([, s]) => s)).toEqual([0.9, 0.8, 0.7]);
+  it('čuva redosled', () => {
+    const entries = [entry('a.pdf', 'x', 0.9), entry('b.pdf', 'y', 0.8)];
+    expect(diversify(entries, 1).map((r) => r.finalScore)).toEqual([0.9, 0.8]);
   });
 
   it('ne dira rezultat kada nema duplikata', () => {
-    const scored: [Document, number][] = [
-      [doc('a.pdf'), 0.9],
-      [doc('b.pdf'), 0.8],
-    ];
-    expect(diversify(scored, 2)).toHaveLength(2);
+    const entries = [entry('a.pdf'), entry('b.pdf')];
+    expect(diversify(entries, 2)).toHaveLength(2);
   });
 });
 
@@ -159,32 +231,31 @@ describe('perDocumentLimit', () => {
 
 describe('formatDocuments', () => {
   it('numeriše izvore i dodaje naziv aranžmana', () => {
-    const { context } = formatDocuments([[doc('Rim_Avio.pdf', 'cena 699 €'), 0.9]]);
+    const { context } = formatDocuments([entry('Rim_Avio.pdf', 'cena 699 €')]);
     expect(context).toContain('[1] Rim Avio');
     expect(context).toContain('cena 699 €');
   });
 
   it('preskače prazne fragmente', () => {
     const { sources } = formatDocuments([
-      [doc('a.pdf', '   '), 0.9],
-      [doc('b.pdf', 'ima sadržaja'), 0.8],
+      entry('a.pdf', '   '),
+      entry('b.pdf', 'ima sadržaja'),
     ]);
     expect(sources).toHaveLength(1);
     expect(sources[0].filename).toBe('b.pdf');
   });
 
   it('poštuje budžet konteksta', () => {
-    const scored: [Document, number][] = Array.from({ length: 10 }, (_, i) => [
-      doc(`f${i}.pdf`, 'x'.repeat(100)),
-      0.9,
-    ]);
-
-    const { sources } = formatDocuments(scored, 250);
-    expect(sources.length).toBeLessThan(10);
+    const entries = Array.from({ length: 10 }, (_, i) =>
+      entry(`f${i}.pdf`, 'x'.repeat(100)),
+    );
+    expect(formatDocuments(entries, 250).sources.length).toBeLessThan(10);
   });
 
-  it('prenosi skor u izvore', () => {
-    const { sources } = formatDocuments([[doc('a.pdf', 'tekst'), 0.77]]);
+  it('u izvore ide originalni skor, ne podignuti', () => {
+    const { sources } = formatDocuments([
+      { ...entry('a.pdf', 'tekst', 0.77), finalScore: 0.89 },
+    ]);
     expect(sources[0].score).toBe(0.77);
   });
 });
