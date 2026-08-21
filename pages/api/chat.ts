@@ -3,21 +3,19 @@ import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { PineconeStore } from '@langchain/pinecone';
 import { Pinecone } from '@pinecone-database/pinecone';
 
+import { env } from '@/lib/env';
 import { streamAnswer, type SearchFn, type StreamEvent } from '@/utils/makechain';
 import { normalizeHistory } from '@/lib/rag/format';
-import { PINECONE_NAME_SPACE } from '@/config/pinecone';
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const PINECONE_API_KEY = process.env.PINECONE_API_KEY!;
-const PINECONE_INDEX_NAME_OVERRIDE = process.env.PINECONE_INDEX_NAME!;
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? 'gemini-embedding-001';
 
 const MAX_QUESTION_LENGTH = 600;
-const RETRIEVAL_K = Number(process.env.RETRIEVAL_K ?? 12);
+/** Koliko razmena prihvatamo od klijenta. Starije server sam sažima. */
 const MAX_HISTORY_TURNS = 12;
 
 // ---------------------------------------------------------------------------
 // Keš
+//
+// Modul-scope keš živi samo dok je serverless instanca topla. Radi kao
+// optimizacija, ne kao garancija.
 // ---------------------------------------------------------------------------
 
 let cachedEmbeddings: GoogleGenerativeAIEmbeddings | null = null;
@@ -27,6 +25,9 @@ const CACHE_DURATION = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Rate limiting po IP adresi
+//
+// NAPOMENA: u memoriji je, pa se na serverless-u resetuje sa svakom novom
+// instancom. Za produkciju treba Redis.
 // ---------------------------------------------------------------------------
 
 const MAX_REQUESTS_PER_MINUTE = 15;
@@ -76,23 +77,23 @@ async function getVectorStore(): Promise<PineconeStore> {
 
   if (cachedVectorStore && cachedEmbeddings && !isStale) return cachedVectorStore;
 
-  console.log(`Inicijalizacija vector store-a (${EMBEDDING_MODEL})...`);
+  console.log(`Inicijalizacija vector store-a (${env.EMBEDDING_MODEL})...`);
 
   cachedEmbeddings = new GoogleGenerativeAIEmbeddings({
-    apiKey: GEMINI_API_KEY,
-    model: EMBEDDING_MODEL,
+    apiKey: env.GEMINI_API_KEY,
+    model: env.EMBEDDING_MODEL,
     maxRetries: 2,
     maxConcurrency: 1,
   });
 
-  const pineconeClient = new Pinecone({ apiKey: PINECONE_API_KEY });
-  const index = pineconeClient.Index(PINECONE_INDEX_NAME_OVERRIDE);
+  const pineconeClient = new Pinecone({ apiKey: env.PINECONE_API_KEY });
+  const index = pineconeClient.Index(env.PINECONE_INDEX_NAME);
 
   cachedVectorStore = await PineconeStore.fromExistingIndex(cachedEmbeddings, {
     // TODO: ukloniti `as any` nakon usklađivanja verzija Pinecone paketa.
     pineconeIndex: index as any,
     textKey: 'text',
-    namespace: PINECONE_NAME_SPACE,
+    namespace: env.PINECONE_NAMESPACE,
   });
 
   lastInitTime = Date.now();
@@ -132,8 +133,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
    * NDJSON: jedan JSON objekat po redu.
    *
    * Prostiji od Server-Sent Events i dovoljan ovde, jer je veza jednosmerna
-   * i traje koliko i jedan odgovor. Klijent deli po prelomu reda i parsira
-   * red po red.
+   * i traje koliko i jedan odgovor.
    */
   res.writeHead(200, {
     'Content-Type': 'application/x-ndjson; charset=utf-8',
@@ -153,13 +153,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const vectorStore = await getVectorStore();
+
+    /**
+     * Skorovi su potrebni da bi se odbacili nerelevantni rezultati, pa se
+     * koristi similaritySearchWithScore umesto običnog retrievera.
+     */
     const search: SearchFn = (query, k) => vectorStore.similaritySearchWithScore(query, k);
 
     for await (const event of streamAnswer({
       question: sanitizedQuestion,
       history: chatHistory,
       search,
-      k: RETRIEVAL_K,
+      k: env.RETRIEVAL_K,
       signal: controller.signal,
     })) {
       if (controller.signal.aborted) break;
