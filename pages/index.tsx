@@ -4,7 +4,7 @@ import dynamic from 'next/dynamic';
 import Head from 'next/head';
 import Image from 'next/image';
 import { ArrowUp, MessageSquare, Shuffle } from 'lucide-react';
-
+import Link from 'next/link';
 import { fontVariables } from '@/utils/fonts';
 import { DESTINATIONS } from '@/components/Globe';
 import { shouldPlayIntro } from '@/components/Intro';
@@ -161,14 +161,16 @@ export default function Landing() {
 
             <RouteTicker onSelect={(name) => go(`Koje ponude imate za ${name}`)} />
 
-            <a
-              href="/chat"
-              aria-label="Otvori chat"
-              title="Otvori chat"
-              className="flex h-10 w-10 items-center justify-center rounded-full border border-ink-line text-mute-light transition-colors hover:border-amber hover:text-amber focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber"
-            >
+          <Link
+  href="/chat"
+  aria-label="Otvori chat"
+  title="Otvori chat"
+  className="flex h-10 w-10 items-center justify-center rounded-full border border-ink-line text-mute-light transition-colors hover:border-amber hover:text-amber focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber"
+>
+  <MessageSquare className="h-[18px] w-[18px]" aria-hidden="true" />
+</Link>
               <MessageSquare className="h-[18px] w-[18px]" aria-hidden="true" />
-            </a>
+          
           </nav>
 
           <div className="flex flex-1 flex-col items-center justify-center pb-14 pt-6 text-center">
