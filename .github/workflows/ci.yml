@@ -27,7 +27,7 @@ jobs:
       # @langchain/community oko verzije better-sqlite3. Kada se napušteni
       # @langchain/community ukloni, ova zastavica prestaje da bude potrebna.
       - name: Instalacija
-        run: npm ci --legacy-peer-deps
+        run: npm ci
 
       - name: Tipovi
         run: npm run type-check

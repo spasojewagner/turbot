@@ -10,6 +10,7 @@ module.exports = {
     extend: {
       colors: {
         ink: {
+          // Chat je najtamniji sloj. Bez toga prelaz sa introa zaslepljuje.
           deep: '#080E15',
           DEFAULT: '#0B1A2A',
           soft: '#14212E',
@@ -33,30 +34,69 @@ module.exports = {
           light: '#93A3B4',
         },
       },
+
       fontFamily: {
         display: ['var(--font-display)', 'system-ui', 'sans-serif'],
         sans: ['var(--font-body)', 'system-ui', 'sans-serif'],
         mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
       },
+
       letterSpacing: {
-        eyebrow: '0.18em',
+        eyebrow: '0.16em',
       },
+
+      /**
+       * Tri radijusa i krug. Ranije ih je bilo sedam, bez obrazloženja
+       * za nijedan — kartica od 2rem pored dugmeta od 0.5rem izgleda kao
+       * da pripadaju različitim proizvodima.
+       *
+       *   control  sitne kontrole, čipovi izvora
+       *   panel    dugmad, polja, poruke
+       *   surface  kartice i composer
+       */
+      borderRadius: {
+        control: '6px',
+        panel: '10px',
+        surface: '16px',
+      },
+
       maxWidth: {
-        thread: '48rem',
+        thread: '46rem',
       },
+
+      /**
+       * Ugrađene CSS krive su preslabe da bi se osetile.
+       * `out` je za ulazak i izlazak, `in-out` za pomeranje po ekranu.
+       * `ease-in` se ne koristi na UI-ju: počinje sporo, baš u trenutku
+       * kada korisnik gleda.
+       */
+      transitionTimingFunction: {
+        out: 'cubic-bezier(0.23, 1, 0.32, 1)',
+        'in-out': 'cubic-bezier(0.77, 0, 0.175, 1)',
+      },
+
       keyframes: {
-        'fade-up': {
-          from: { opacity: '0', transform: 'translateY(12px)' },
+        /** Ulazak sadržaja. Pomeraj je mali; veći deluje kao skok. */
+        enter: {
+          from: { opacity: '0', transform: 'translateY(8px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
-        flap: {
+        /** Pokazatelj rada. Samo providnost, bez kretanja. */
+        'pulse-soft': {
           '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.35' },
+          '50%': { opacity: '0.3' },
+        },
+        /** Kursor tokom ispisa. Oštar prelaz, kao pravi karet. */
+        caret: {
+          '0%, 45%': { opacity: '1' },
+          '55%, 100%': { opacity: '0' },
         },
       },
+
       animation: {
-        'fade-up': 'fade-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both',
-        flap: 'flap 1.5s ease-in-out infinite',
+        enter: 'enter 400ms cubic-bezier(0.23, 1, 0.32, 1) both',
+        'pulse-soft': 'pulse-soft 1.4s ease-in-out infinite',
+        caret: 'caret 1s steps(1, end) infinite',
       },
     },
   },
