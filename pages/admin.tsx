@@ -15,10 +15,21 @@ interface DocumentRecord {
   status: DocumentStatus;
   extraction?: 'pdf' | 'ocr';
   chunkCount?: number;
+  chunkDone?: number;
+  chunkTotal?: number;
   error?: string;
 }
 
 const TOKEN_KEY = 'turbot:admin-token';
+
+/**
+ * Gornja granica prolaza kroz petlju.
+ *
+ * Jedan poziv obradi do dvanaest fragmenata, pa cenovnik od pedesetak traži
+ * pet prolaza. Dvesta pokriva ceo korpus sa rezervom, a sprečava beskonačnu
+ * petlju ako server počne da vraća isto stanje.
+ */
+const MAX_PASSES = 200;
 
 const STATUS_LABEL: Record<DocumentStatus, string> = {
   pending: 'na čekanju',
@@ -44,9 +55,11 @@ export default function AdminPage() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const stopRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -64,13 +77,21 @@ export default function AdminPage() {
     [token],
   );
 
+  /** Odgovor ume da bude HTML stranica greške, ne JSON. */
+  const parseJson = async (response: Response) => {
+    try {
+      return await response.json();
+    } catch {
+      return { error: `Server je vratio nečitljiv odgovor (${response.status}).` };
+    }
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
-    setError(null);
 
     try {
       const response = await fetch('/api/documents', { headers: headers() });
-      const data = await response.json();
+      const data = await parseJson(response);
 
       if (!response.ok) {
         setError(data.error ?? `Zahtev nije uspeo (${response.status}).`);
@@ -78,6 +99,7 @@ export default function AdminPage() {
         return;
       }
 
+      setError(null);
       setDocuments(data.documents ?? []);
     } catch {
       setError('Nije moguće povezivanje sa serverom.');
@@ -95,7 +117,7 @@ export default function AdminPage() {
     try {
       sessionStorage.setItem(TOKEN_KEY, value);
     } catch {
-      // Bez trajnog čuvanja, token važi do osvežavanja stranice.
+      // Bez trajnog čuvanja token važi do osvežavanja stranice.
     }
   };
 
@@ -106,6 +128,8 @@ export default function AdminPage() {
     setError(null);
 
     for (const file of Array.from(files)) {
+      setProgress(`dodajem ${file.name}`);
+
       try {
         const response = await fetch(
           `/api/documents?filename=${encodeURIComponent(file.name)}`,
@@ -116,7 +140,7 @@ export default function AdminPage() {
           },
         );
 
-        const data = await response.json();
+        const data = await parseJson(response);
         if (!response.ok) setError(data.error ?? 'Dodavanje nije uspelo.');
       } catch {
         setError('Dodavanje nije uspelo.');
@@ -124,22 +148,26 @@ export default function AdminPage() {
     }
 
     setBusy(null);
+    setProgress(null);
     if (fileRef.current) fileRef.current.value = '';
     await load();
   };
 
   /**
-   * Obrada se poziva u petlji, jedan dokument po zahtevu.
+   * Obrada ide u prolazima.
    *
-   * Serverless funkcija ima gornju granicu trajanja, pa se sve odjednom ne
-   * može. Petlja na klijentu je jednostavnija od reda poslova i dovoljna
-   * pri ovom obimu.
+   * Serverless funkcija ima vremensko ograničenje, pa jedan poziv obradi
+   * ograničen broj fragmenata i vrati dokle je stigao. Petlja ponavlja dok
+   * ceo posao ne bude gotov.
    */
   const ingestAll = async () => {
     setBusy('ingest');
     setError(null);
+    stopRef.current = false;
 
-    for (let i = 0; i < 50; i += 1) {
+    for (let pass = 0; pass < MAX_PASSES; pass += 1) {
+      if (stopRef.current) break;
+
       try {
         const response = await fetch('/api/documents/ingest', {
           method: 'POST',
@@ -147,22 +175,33 @@ export default function AdminPage() {
           body: JSON.stringify({}),
         });
 
-        const data = await response.json();
-        await load();
+        const data = await parseJson(response);
 
         if (data.error) {
           setError(data.error);
           break;
         }
 
-        if (data.done) break;
+        if (data.current) {
+          setProgress(
+            `${data.current.filename}, ${data.current.chunkDone}/${data.current.chunkTotal} fragmenata`,
+          );
+        }
+
+        // Spisak se osvežava samo kad je dokument gotov — inače bi se
+        // prepisivao pri svakom prolazu i treperio.
+        if (data.done) await load();
+
+        if (data.finished) break;
       } catch {
-        setError('Obrada nije uspela.');
+        setError('Obrada nije uspela. Proveri vezu pa pokušaj ponovo.');
         break;
       }
     }
 
     setBusy(null);
+    setProgress(null);
+    await load();
   };
 
   const remove = async (doc: DocumentRecord) => {
@@ -177,7 +216,7 @@ export default function AdminPage() {
         headers: headers(),
       });
 
-      const data = await response.json();
+      const data = await parseJson(response);
       if (!response.ok) setError(data.error ?? 'Brisanje nije uspelo.');
     } catch {
       setError('Brisanje nije uspelo.');
@@ -187,9 +226,7 @@ export default function AdminPage() {
     await load();
   };
 
-  const naCekanju = documents.filter(
-    (d) => d.status === 'pending' || d.status === 'failed',
-  ).length;
+  const zaObradu = documents.filter((d) => d.status !== 'ready').length;
   const fragmenata = documents.reduce((sum, d) => sum + (d.chunkCount ?? 0), 0);
 
   return (
@@ -236,7 +273,7 @@ export default function AdminPage() {
             />
           </div>
 
-          <div className="mb-6 flex flex-wrap items-center gap-2">
+          <div className="mb-4 flex flex-wrap items-center gap-2">
             <input
               ref={fileRef}
               type="file"
@@ -260,26 +297,43 @@ export default function AdminPage() {
               dodaj cenovnike
             </button>
 
-            <button
-              type="button"
-              onClick={() => void ingestAll()}
-              disabled={busy !== null || naCekanju === 0}
-              className="flex h-11 items-center gap-2 rounded-panel border border-ink-line px-5 font-mono text-sm text-paper-dim transition-colors duration-150 ease-out hover:border-teal hover:text-paper focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal active:scale-[0.97] disabled:opacity-30"
-            >
-              {busy === 'ingest' && (
+            {busy === 'ingest' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  stopRef.current = true;
+                }}
+                className="flex h-11 items-center gap-2 rounded-panel border border-ink-line px-5 font-mono text-sm text-paper-dim transition-colors duration-150 ease-out hover:border-amber hover:text-amber active:scale-[0.97]"
+              >
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-              )}
-              obradi na čekanju
-              {naCekanju > 0 && <span className="text-amber">{naCekanju}</span>}
-            </button>
+                prekini obradu
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void ingestAll()}
+                disabled={busy !== null || zaObradu === 0}
+                className="flex h-11 items-center gap-2 rounded-panel border border-ink-line px-5 font-mono text-sm text-paper-dim transition-colors duration-150 ease-out hover:border-teal hover:text-paper focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal active:scale-[0.97] disabled:opacity-30"
+              >
+                obradi na čekanju
+                {zaObradu > 0 && <span className="text-amber">{zaObradu}</span>}
+              </button>
+            )}
           </div>
+
+          {progress && (
+            <p className="mb-4 font-mono text-xs text-teal">{progress}</p>
+          )}
 
           {error && (
             <div
               role="alert"
               className="mb-6 flex animate-enter items-start gap-2 rounded-panel border border-amber/35 bg-amber/10 px-4 py-3"
             >
-              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber" aria-hidden="true" />
+              <TriangleAlert
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber"
+                aria-hidden="true"
+              />
               <p className="text-sm">{error}</p>
             </div>
           )}
@@ -308,8 +362,12 @@ export default function AdminPage() {
                     <p className="truncate text-sm text-paper">{doc.filename}</p>
                     <p className="mt-0.5 font-mono text-[11px] text-mute">
                       {formatSize(doc.size)}
-                      {typeof doc.chunkCount === 'number' &&
+                      {doc.status === 'ready' &&
+                        typeof doc.chunkCount === 'number' &&
                         `, ${doc.chunkCount} fragmenata`}
+                      {doc.status === 'processing' &&
+                        typeof doc.chunkTotal === 'number' &&
+                        `, ${doc.chunkDone ?? 0}/${doc.chunkTotal} fragmenata`}
                       {doc.extraction === 'ocr' && ', pročitano modelom'}
                     </p>
                     {doc.error && (
@@ -320,7 +378,9 @@ export default function AdminPage() {
                   <span
                     className={`flex shrink-0 items-center gap-1.5 rounded-control border px-2 py-1 font-mono text-[11px] ${STATUS_STYLE[doc.status]}`}
                   >
-                    {doc.status === 'ready' && <Check className="h-3 w-3" aria-hidden="true" />}
+                    {doc.status === 'ready' && (
+                      <Check className="h-3 w-3" aria-hidden="true" />
+                    )}
                     {doc.status === 'processing' && (
                       <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
                     )}
@@ -346,8 +406,8 @@ export default function AdminPage() {
           )}
 
           <p className="mt-8 font-mono text-[11px] leading-relaxed text-mute">
-            Brisanje uklanja i fragmente iz vektorske baze. Skenirani cenovnici se
-            čitaju modelom, a prepis se čuva da se isti posao ne plati dvaput.
+            Veći cenovnici se obrađuju u više prolaza, jer jedan poziv ne sme da
+            traje duže od minuta. Brisanje uklanja i fragmente iz vektorske baze.
           </p>
         </main>
       </div>

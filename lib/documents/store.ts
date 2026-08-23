@@ -12,20 +12,16 @@ import { env } from '@/lib/env';
  * ne postoji.
  *
  * Granica na kojoj to prestaje da važi: više administratora koji pišu
- * istovremeno, ili nekoliko stotina dokumenata. Tada manifest postaje usko
- * grlo i treba prava tabela.
+ * istovremeno, ili nekoliko stotina dokumenata.
  */
 
 const MANIFEST_PATH = 'documents/manifest.json';
 const DOCS_PREFIX = 'documents/files/';
-const OCR_PREFIX = 'documents/ocr/';
+const TEXT_PREFIX = 'documents/text/';
 
 /**
  * Način pristupa mora da odgovara podešavanju samog store-a.
- *
- * Vercel odbija upis sa `public` u privatan store i obrnuto. Novi store-ovi
- * su podrazumevano privatni, pa je to i ovde default; ako je tvoj javan,
- * postavi BLOB_ACCESS=public.
+ * Vercel odbija upis sa `public` u privatan store i obrnuto.
  */
 const ACCESS: 'public' | 'private' =
   process.env.BLOB_ACCESS === 'public' ? 'public' : 'private';
@@ -35,9 +31,7 @@ export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed';
 export interface DocumentRecord {
   id: string;
   filename: string;
-  /** URL fajla u Blob-u. Kod privatnog store-a traži token pri čitanju. */
   url: string;
-  /** Putanja unutar Blob-a, potrebna za brisanje. */
   pathname: string;
   size: number;
   /** sha256 sadržaja. Sprečava dvostruko dodavanje istog fajla. */
@@ -46,11 +40,22 @@ export interface DocumentRecord {
   status: DocumentStatus;
   /** Poreklo teksta: tekstualni sloj PDF-a ili prepis modelom. */
   extraction?: 'pdf' | 'ocr';
+
+  /**
+   * Napredak ingestije.
+   *
+   * Veliki cenovnici ne stanu u jedan poziv — serverless funkcija ima gornju
+   * granicu trajanja. Zato se obrada deli na više prolaza, a ovde stoji
+   * dokle se stiglo.
+   */
+  chunkTotal?: number;
+  chunkDone?: number;
   chunkCount?: number;
+
   /**
    * ID-jevi fragmenata u Pineconeu.
    *
-   * Čuvaju se da bi brisanje dokumenta moglo da obriše i njegove vektore.
+   * Čuvaju se da bi brisanje dokumenta moglo da ukloni i njegove vektore.
    * Brisanje po metapodacima nije podržano na svim Pinecone nivoima, a
    * brisanje po listi ID-jeva radi svuda.
    */
@@ -84,10 +89,8 @@ function assertEnabled(): void {
 const blobOptions = () => ({ token: env.BLOB_READ_WRITE_TOKEN });
 
 /**
- * Čitanje sadržaja iz Blob-a.
- *
  * Privatni store ne servira fajlove javno, pa URL sam po sebi nije dovoljan.
- * Token ide kao Bearer zaglavlje. Kod javnog store-a je zaglavlje bezopasno.
+ * Token ide kao Bearer zaglavlje; kod javnog store-a je bezopasan.
  */
 async function fetchBlob(url: string): Promise<Response> {
   return fetch(url, {
@@ -117,7 +120,6 @@ export async function readManifest(): Promise<Manifest> {
 
     return Array.isArray(parsed?.documents) ? parsed : { ...EMPTY, documents: [] };
   } catch {
-    // Oštećen manifest ne sme da obori aplikaciju; radi se sa praznim.
     console.warn('[documents] manifest se ne može pročitati, koristim prazan');
     return { ...EMPTY, documents: [] };
   }
@@ -142,10 +144,8 @@ async function writeManifest(documents: DocumentRecord[]): Promise<void> {
 }
 
 /**
- * Izmena jednog zapisa.
- *
- * Poslednji upis pobeđuje. Uz jednog administratora to je prihvatljivo;
- * uz više njih bi trebalo zaključavanje ili prava baza.
+ * Izmena jednog zapisa. Poslednji upis pobeđuje, što je uz jednog
+ * administratora prihvatljivo.
  */
 export async function updateDocument(
   id: string,
@@ -179,7 +179,6 @@ export async function findDocument(id: string): Promise<DocumentRecord | null> {
 
 export interface UploadResult {
   document: DocumentRecord;
-  /** Dokument sa istim sadržajem je već postojao. */
   duplicate: boolean;
 }
 
@@ -229,11 +228,11 @@ export async function removeDocument(id: string): Promise<DocumentRecord | null>
   const record = documents.find((d) => d.id === id);
   if (!record) return null;
 
-  // Fajl i njegov OCR prepis. Greške pri brisanju se ne propagiraju —
-  // zapis mora da nestane iz manifesta i ako je fajl već obrisan.
+  // Greške pri brisanju se ne propagiraju — zapis mora da nestane iz
+  // manifesta i ako je fajl već obrisan.
   await Promise.allSettled([
     del(record.pathname, blobOptions()),
-    del(`${OCR_PREFIX}${id}.txt`, blobOptions()),
+    del(`${TEXT_PREFIX}${id}.txt`, blobOptions()),
   ]);
 
   await writeManifest(documents.filter((d) => d.id !== id));
@@ -241,20 +240,21 @@ export async function removeDocument(id: string): Promise<DocumentRecord | null>
 }
 
 // ---------------------------------------------------------------------------
-// Keš OCR prepisa
+// Keš izvučenog teksta
 // ---------------------------------------------------------------------------
 
 /**
- * OCR je plaćen poziv modelu, pa se rezultat čuva.
+ * Izvučen tekst se čuva iz dva razloga.
  *
- * Bez ovoga bi svaka ponovljena ingestija skeniranog cenovnika ponovo
- * plaćala isti posao.
+ * Kod skeniranih cenovnika je to rezultat plaćenog poziva modelu, pa se ne
+ * plaća dvaput. Kod svih ostalih omogućava da se prekinuta ingestija nastavi
+ * bez ponovnog preuzimanja i parsiranja PDF-a.
  */
-export async function readOcrText(id: string): Promise<string | null> {
+export async function readCachedText(id: string): Promise<string | null> {
   assertEnabled();
 
   const { blobs } = await list({
-    prefix: `${OCR_PREFIX}${id}.txt`,
+    prefix: `${TEXT_PREFIX}${id}.txt`,
     limit: 1,
     ...blobOptions(),
   });
@@ -269,10 +269,10 @@ export async function readOcrText(id: string): Promise<string | null> {
   }
 }
 
-export async function writeOcrText(id: string, text: string): Promise<void> {
+export async function writeCachedText(id: string, text: string): Promise<void> {
   assertEnabled();
 
-  await put(`${OCR_PREFIX}${id}.txt`, text, {
+  await put(`${TEXT_PREFIX}${id}.txt`, text, {
     access: ACCESS,
     contentType: 'text/plain; charset=utf-8',
     addRandomSuffix: false,

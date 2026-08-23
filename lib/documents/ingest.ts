@@ -3,16 +3,15 @@ import { createRequire } from 'node:module';
 
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
-import { Document } from '@langchain/core/documents';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Pinecone } from '@pinecone-database/pinecone';
 
 import { env, OCR_MODEL } from '@/lib/env';
 import {
   fetchDocumentBuffer,
-  readOcrText,
+  readCachedText,
   updateDocument,
-  writeOcrText,
+  writeCachedText,
   type DocumentRecord,
 } from '@/lib/documents/store';
 
@@ -21,8 +20,18 @@ const pdfParse = require('pdf-parse/lib/pdf-parse.js');
 
 /** Ispod ovoliko znakova po strani smatramo da tekstualnog sloja nema. */
 const MIN_CHARS_PER_PAGE = 200;
-const BATCH_SIZE = 4;
-const BATCH_DELAY_MS = 1500;
+
+/**
+ * Koliko fragmenata se obradi u jednom pozivu.
+ *
+ * Embedovanje jednog fragmenta traje oko dve sekunde, a serverless funkcija
+ * ima gornju granicu od šezdeset. Dvanaest ostavlja prostor za preuzimanje
+ * fajla i upis u Pinecone. Veći cenovnici se obrađuju u više prolaza.
+ */
+const CHUNKS_PER_CALL = Number(process.env.INGEST_CHUNKS_PER_CALL ?? 12);
+
+const EMBED_BATCH = 4;
+const EMBED_DELAY_MS = 1200;
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -51,33 +60,37 @@ Pravila:
 // ---------------------------------------------------------------------------
 
 /**
- * Skenirani cenovnici nemaju tekstualni sloj — `pdf-parse` iz njih izvuče po
- * nekoliko znakova. Za takve se PDF šalje modelu, koji ga čita direktno.
- * Rezultat se keširа, jer je to plaćen poziv.
+ * Tekst se izvuče jednom i keširа.
+ *
+ * Kod skeniranih cenovnika je to poziv modelu, dakle plaćen posao. Kod svih
+ * ostalih keš omogućava da se ingestija nastavi u sledećem prolazu bez
+ * ponovnog preuzimanja i parsiranja PDF-a.
  */
-async function extractText(
+async function getText(
   record: DocumentRecord,
-  buffer: Buffer,
 ): Promise<{ text: string; extraction: 'pdf' | 'ocr' }> {
+  const cached = await readCachedText(record.id);
+  if (cached) {
+    return { text: cached, extraction: record.extraction ?? 'pdf' };
+  }
+
+  const buffer = await fetchDocumentBuffer(record);
   const parsed = await pdfParse(buffer);
+
   const raw = (parsed.text ?? '').trim();
   const pages = parsed.numpages ?? 1;
 
   if (Math.round(raw.length / pages) >= MIN_CHARS_PER_PAGE) {
+    await writeCachedText(record.id, raw);
     return { text: raw, extraction: 'pdf' };
   }
-
-  const cached = await readOcrText(record.id);
-  if (cached) return { text: cached, extraction: 'ocr' };
 
   const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({ model: OCR_MODEL });
 
   const result = await model.generateContent([
     { text: OCR_PROMPT },
-    {
-      inlineData: { mimeType: 'application/pdf', data: buffer.toString('base64') },
-    },
+    { inlineData: { mimeType: 'application/pdf', data: buffer.toString('base64') } },
   ]);
 
   const text = result.response.text().trim();
@@ -86,7 +99,7 @@ async function extractText(
     throw new Error(`Model je vratio premalo teksta (${text.length} znakova)`);
   }
 
-  await writeOcrText(record.id, text);
+  await writeCachedText(record.id, text);
   return { text, extraction: 'ocr' };
 }
 
@@ -111,16 +124,18 @@ function toTitle(filename: string): string {
 }
 
 /**
- * Naziv aranžmana ide na početak svakog fragmenta.
+ * Podela je determinističa: isti tekst i isti parametri daju iste fragmente
+ * istim redom. Zbog toga se ingestija može prekinuti i nastaviti bez rizika
+ * da se nešto preskoči ili ponovi.
  *
- * Tabele sa cenama su nizovi brojeva i oznaka koji semantički ne liče ni na
- * jedno pitanje. Bez ovog zaglavlja fragment "HOTEL 3*** / 549€" nikada ne
- * pobedi prozni opis uslova, iako sadrži traženi odgovor.
+ * Naziv aranžmana ide na početak svakog fragmenta. Tabele sa cenama su nizovi
+ * brojeva koji semantički ne liče ni na jedno pitanje; bez tog zaglavlja ih
+ * pretraga nikada ne nađe.
  */
-async function splitIntoChunks(
+async function buildChunks(
   record: DocumentRecord,
   text: string,
-): Promise<Document[]> {
+): Promise<{ content: string; index: number }[]> {
   const splitter = new RecursiveCharacterTextSplitter({
     chunkSize: env.CHUNK_SIZE,
     chunkOverlap: env.CHUNK_OVERLAP,
@@ -132,22 +147,14 @@ async function splitIntoChunks(
   return parts
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
-    .map(
-      (part, index) =>
-        new Document({
-          pageContent: title ? `${title}\n\n${part}` : part,
-          metadata: {
-            documentId: record.id,
-            filename: record.filename,
-            title,
-            chunkIndex: index,
-          },
-        }),
-    );
+    .map((part, index) => ({
+      content: title ? `${title}\n\n${part}` : part,
+      index,
+    }));
 }
 
 // ---------------------------------------------------------------------------
-// Upis u Pinecone
+// Embedovanje
 // ---------------------------------------------------------------------------
 
 /**
@@ -159,16 +166,13 @@ async function splitIntoChunks(
  */
 async function embedAll(
   embeddings: GoogleGenerativeAIEmbeddings,
-  docs: Document[],
+  contents: string[],
 ): Promise<number[][]> {
   const vectors: number[][] = [];
 
-  for (let i = 0; i < docs.length; i += BATCH_SIZE) {
-    const batch = docs.slice(i, i + BATCH_SIZE);
-
-    const result = await Promise.all(
-      batch.map((doc) => embeddings.embedQuery(doc.pageContent)),
-    );
+  for (let i = 0; i < contents.length; i += EMBED_BATCH) {
+    const batch = contents.slice(i, i + EMBED_BATCH);
+    const result = await Promise.all(batch.map((text) => embeddings.embedQuery(text)));
 
     const prazni = result.filter((v) => !Array.isArray(v) || v.length === 0).length;
     if (prazni > 0) {
@@ -177,33 +181,76 @@ async function embedAll(
 
     vectors.push(...result);
 
-    if (i + BATCH_SIZE < docs.length) await delay(BATCH_DELAY_MS);
+    if (i + EMBED_BATCH < contents.length) await delay(EMBED_DELAY_MS);
   }
 
   return vectors;
 }
 
-export interface IngestResult {
-  chunkCount: number;
+// ---------------------------------------------------------------------------
+// Ingestija
+// ---------------------------------------------------------------------------
+
+export interface IngestProgress {
+  done: boolean;
+  chunkDone: number;
+  chunkTotal: number;
   extraction: 'pdf' | 'ocr';
 }
 
 /**
- * Obrada jednog dokumenta od početka do kraja.
+ * Obrada jednog dokumenta, u prolazima.
  *
- * Deljena je između API rute i CLI skripte, pa se ponašanje ne razilazi
- * između dva načina pokretanja.
+ * Jedan poziv obradi najviše `CHUNKS_PER_CALL` fragmenata i vrati koliko je
+ * ostalo. Pozivalac ponavlja dok `done` ne postane tačno.
+ *
+ * Ranije je cela obrada morala da stane u jedan zahtev, pa je cenovnik od
+ * 1.7 MB obarao funkciju na vremenskom ograničenju.
  */
-export async function ingestDocument(record: DocumentRecord): Promise<IngestResult> {
-  await updateDocument(record.id, { status: 'processing', error: undefined });
+export async function ingestDocument(record: DocumentRecord): Promise<IngestProgress> {
+  const fresh = record.status !== 'processing' || !record.chunkDone;
 
   try {
-    const buffer = await fetchDocumentBuffer(record);
-    const { text, extraction } = await extractText(record, buffer);
-    const docs = await splitIntoChunks(record, text);
+    if (fresh) {
+      // Ponovna obrada već indeksiranog dokumenta prvo briše stare vektore,
+      // inače bi u indeksu ostala dva skupa fragmenata istog sadržaja.
+      if (record.chunkIds?.length) {
+        await deleteDocumentVectors(record);
+      }
 
-    if (docs.length === 0) {
+      await updateDocument(record.id, {
+        status: 'processing',
+        chunkDone: 0,
+        chunkIds: [],
+        error: undefined,
+      });
+    }
+
+    const { text, extraction } = await getText(record);
+    const chunks = await buildChunks(record, text);
+
+    if (chunks.length === 0) {
       throw new Error('Dokument nema upotrebljiv tekst');
+    }
+
+    const alreadyDone = fresh ? 0 : (record.chunkDone ?? 0);
+    const slice = chunks.slice(alreadyDone, alreadyDone + CHUNKS_PER_CALL);
+
+    if (slice.length === 0) {
+      await updateDocument(record.id, {
+        status: 'ready',
+        chunkTotal: chunks.length,
+        chunkDone: chunks.length,
+        chunkCount: chunks.length,
+        extraction,
+      });
+
+      return {
+        done: true,
+        chunkDone: chunks.length,
+        chunkTotal: chunks.length,
+        extraction,
+      };
     }
 
     const embeddings = new GoogleGenerativeAIEmbeddings({
@@ -213,39 +260,50 @@ export async function ingestDocument(record: DocumentRecord): Promise<IngestResu
       maxConcurrency: 2,
     });
 
-    const vectors = await embedAll(embeddings, docs);
+    const vectors = await embedAll(
+      embeddings,
+      slice.map((c) => c.content),
+    );
 
     const pinecone = new Pinecone({ apiKey: env.PINECONE_API_KEY });
     const namespace = pinecone
       .Index(env.PINECONE_INDEX_NAME)
       .namespace(env.PINECONE_NAMESPACE);
 
-    const chunkIds = docs.map((doc, i) => chunkId(record.id, i, doc.pageContent));
+    const ids = slice.map((c) => chunkId(record.id, c.index, c.content));
 
     await namespace.upsert(
-      docs.map((doc, i) => ({
-        id: chunkIds[i],
+      slice.map((c, i) => ({
+        id: ids[i],
         values: vectors[i],
         metadata: {
           // Ključ mora biti `text` — chat čita sa textKey: 'text'.
-          text: doc.pageContent,
+          text: c.content,
           documentId: record.id,
           filename: record.filename,
-          title: String(doc.metadata.title ?? ''),
+          title: toTitle(record.filename),
           extraction,
         },
       })),
     );
 
+    const chunkDone = alreadyDone + slice.length;
+    const done = chunkDone >= chunks.length;
+
+    // Postojeći zapis se ponovo čita da bi se ID-jevi dopunili, a ne pregazili.
+    const existingIds = fresh ? [] : (record.chunkIds ?? []);
+
     await updateDocument(record.id, {
-      status: 'ready',
+      status: done ? 'ready' : 'processing',
       extraction,
-      chunkCount: docs.length,
-      chunkIds,
+      chunkTotal: chunks.length,
+      chunkDone,
+      chunkCount: done ? chunks.length : undefined,
+      chunkIds: [...existingIds, ...ids],
       error: undefined,
     });
 
-    return { chunkCount: docs.length, extraction };
+    return { done, chunkDone, chunkTotal: chunks.length, extraction };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await updateDocument(record.id, { status: 'failed', error: message.slice(0, 300) });

@@ -6,15 +6,13 @@ import { findDocument, listDocuments } from '@/lib/documents/store';
 import { ingestDocument } from '@/lib/documents/ingest';
 
 /**
- * Obrada dokumenata na čekanju.
+ * Jedan prolaz kroz obradu.
  *
- * Namerno obrađuje **jedan po pozivu**. Serverless funkcija ima gornju
- * granicu trajanja, a ingestija jednog cenovnika sa embedovanjem i rate
- * limitima ume da potraje. Klijent poziva rutu u petlji dok ima posla, što
- * je jednostavnije od reda čekanja i dovoljno pri ovom obimu.
+ * Ne obrađuje ceo dokument, nego ograničen broj fragmenata, pa vraća dokle je
+ * stigao. Klijent poziva rutu u petlji dok `done` ne postane tačno.
  *
- * Granica na kojoj to prestaje da važi: dokumenti od nekoliko stotina
- * strana, ili masovno dodavanje. Tada treba pravi red poslova.
+ * Razlog je vremensko ograničenje serverless funkcije: cenovnik od 1.7 MB ima
+ * četrdesetak fragmenata, a embedovanje jednog traje oko dve sekunde.
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const log = createLogger(requestIdFrom(req.headers));
@@ -30,37 +28,51 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const requestedId = typeof req.body?.id === 'string' ? req.body.id : null;
 
+    /**
+     * Dokumenti u obradi imaju prednost — prvo se dovrši započeto, pa se
+     * kreće na sledeći. Inače bi petlja skakala između dokumenata.
+     */
+    const documents = await listDocuments();
+
     const record = requestedId
       ? await findDocument(requestedId)
-      : (await listDocuments())
+      : documents.find((d) => d.status === 'processing') ??
+        [...documents]
           .reverse()
-          .find((d) => d.status === 'pending' || d.status === 'failed') ?? null;
+          .find((d) => d.status === 'pending' || d.status === 'failed') ??
+        null;
 
     if (!record) {
-      return res.status(200).json({ done: true, message: 'Nema dokumenata na čekanju.' });
+      return res.status(200).json({
+        done: true,
+        finished: true,
+        message: 'Nema dokumenata na čekanju.',
+      });
     }
 
-    log.info('Ingestija počela', { id: record.id, filename: record.filename });
+    const progress = await ingestDocument(record);
 
-    const result = await ingestDocument(record);
-
-    log.info('Ingestija završena', {
+    log.info(progress.done ? 'Dokument obrađen' : 'Prolaz završen', {
       id: record.id,
-      fragmenata: result.chunkCount,
-      poreklo: result.extraction,
+      filename: record.filename,
+      napredak: `${progress.chunkDone}/${progress.chunkTotal}`,
+      poreklo: progress.extraction,
     });
 
     const preostalo = (await listDocuments()).filter(
-      (d) => d.status === 'pending',
+      (d) => d.status === 'pending' || d.status === 'processing' || d.status === 'failed',
     ).length;
 
     return res.status(200).json({
-      done: preostalo === 0,
-      processed: {
+      // `done` se odnosi na trenutni dokument, `finished` na ceo posao.
+      done: progress.done,
+      finished: progress.done && preostalo === 0,
+      current: {
         id: record.id,
         filename: record.filename,
-        chunkCount: result.chunkCount,
-        extraction: result.extraction,
+        chunkDone: progress.chunkDone,
+        chunkTotal: progress.chunkTotal,
+        extraction: progress.extraction,
       },
       preostalo,
     });
@@ -68,9 +80,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const message = err instanceof Error ? err.message : String(err);
     log.error('Ingestija pala', { greska: message });
 
-    // 200 namerno: klijent u petlji treba da vidi grešku i stane, a ne da
-    // je protumači kao mrežni problem i pokušava ponovo.
-    return res.status(200).json({ done: false, error: message.slice(0, 300) });
+    /**
+     * Status 200 namerno: klijent u petlji treba da pročita grešku i stane.
+     * Sa 5xx bi je pomešao sa mrežnim problemom i nastavio da pokušava.
+     */
+    return res.status(200).json({
+      done: false,
+      finished: true,
+      error: message.slice(0, 300),
+    });
   }
 }
 
