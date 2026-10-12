@@ -251,7 +251,7 @@ export default function Landing() {
                     type="button"
                     onClick={() => go(query)}
                     disabled={!query.trim()}
-                    className="flex h-12 items-center gap-2 rounded-full bg-amber px-6 font-mono text-sm font-medium uppercase tracking-eyebrow text-ink transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber active:scale-[0.97] disabled:opacity-25 disabled:active:scale-100"
+                    className="flex h-12 items-center gap-2 rounded-full bg-amber px-6 font-mono text-sm font-medium uppercase tracking-eyebrow text-ink transition-[opacity,transform,background-color,color] duration-150 ease-out hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber active:scale-[0.97] disabled:bg-transparent disabled:text-amber/60 disabled:ring-1 disabled:ring-inset disabled:ring-amber/30 disabled:hover:opacity-100 disabled:active:scale-100"
                   >
                     pitaj
                     <ArrowUp className="h-4 w-4" aria-hidden="true" />
@@ -269,9 +269,13 @@ export default function Landing() {
             <p className="mb-3 text-center font-mono text-[11px] uppercase tracking-eyebrow text-mute">
               {DESTINATIONS.length} destinacija, {ODLOMAKA} odlomaka u indeksu
             </p>
-            <ul className="flex flex-wrap justify-center gap-1">
+            {/*
+              Na telefonu je lista jedan red koji se skroluje: pet redova
+              destinacija zauzimalo je trećinu ekrana ispod polja za pitanje.
+            */}
+            <ul className="-mx-6 flex snap-x gap-1 overflow-x-auto px-6 pb-1 [mask-image:linear-gradient(to_right,transparent,#000_1.5rem,#000_calc(100%-1.5rem),transparent)] [scrollbar-width:none] sm:mx-0 sm:flex-wrap sm:justify-center sm:overflow-visible sm:px-0 sm:pb-0 sm:[mask-image:none] [&::-webkit-scrollbar]:hidden">
               {DESTINATIONS.map((d, i) => (
-                <li key={d.name}>
+                <li key={d.name} className="shrink-0 snap-start">
                   <button
                     type="button"
                     onMouseEnter={() => setActive(i)}

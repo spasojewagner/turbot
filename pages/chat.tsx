@@ -102,9 +102,22 @@ export default function ChatPage() {
           <div className="mx-auto flex max-w-thread items-center justify-between px-5 py-3">
             <Link
               href="/"
-              className="rounded-control font-display text-base font-medium tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
+              aria-label="TurBot, početna"
+              className="flex items-center gap-2.5 rounded-control font-display text-base font-medium tracking-tight focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
             >
-              Tur<span className="text-amber">Bot</span>
+              <span className="h-7 w-7 overflow-hidden rounded-full bg-ink-raised ring-1 ring-ink-line">
+                <Image
+                  src="/robot.png"
+                  alt=""
+                  width={56}
+                  height={56}
+                  className="h-full w-full object-cover"
+                  priority
+                />
+              </span>
+              <span>
+                Tur<span className="text-amber">Bot</span>
+              </span>
             </Link>
 
             {messages.length > 0 && (
@@ -221,7 +234,7 @@ export default function ChatPage() {
                   onClick={submit}
                   disabled={!draft.trim()}
                   aria-label="Pošalji"
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-panel bg-amber text-ink transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber active:scale-[0.97] disabled:opacity-25 disabled:active:scale-100"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-panel bg-amber text-ink transition-[opacity,transform,background-color,color] duration-150 ease-out hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber active:scale-[0.97] disabled:bg-transparent disabled:text-amber/60 disabled:ring-1 disabled:ring-inset disabled:ring-amber/30 disabled:hover:opacity-100 disabled:active:scale-100"
                 >
                   <ArrowUp className="h-4 w-4" aria-hidden="true" />
                 </button>

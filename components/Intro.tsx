@@ -88,26 +88,41 @@ export default function Intro({ onDone }: { onDone: () => void }) {
         leaving ? 'pointer-events-none opacity-0' : 'opacity-100'
       }`}
     >
-      <video
-        ref={videoRef}
-        className="absolute inset-0 h-full w-full object-cover"
-        poster="/intro/poster.jpg"
-        preload="auto"
-        muted
-        playsInline
-        autoPlay
-        onEnded={finish}
-        onError={finish}
+      {/*
+        Snimak je vodoravan (16:9). Na uspravnom ekranu `object-cover` je
+        sekao srednju četvrtinu kadra i razvlačio je skoro četiri puta: robot
+        je ostajao bez glave, a slika zrnasta. Uspravno se zato prikazuje ceo
+        kadar u traci preko cele širine, sa zamućenim prvim kadrom iza, a
+        potpis ide ispod trake umesto preko snimka.
+      */}
+      <div
+        className="absolute inset-0 hidden scale-125 bg-cover bg-center opacity-70 blur-2xl brightness-75 saturate-150 portrait:block"
+        style={{ backgroundImage: 'url(/intro/poster.jpg)' }}
         aria-hidden="true"
-      >
-        <source src="/intro/intro.webm" type="video/webm" />
-        <source src="/intro/intro.mp4" type="video/mp4" />
-      </video>
+      />
+
+      <div className="absolute inset-0 portrait:inset-x-0 portrait:bottom-auto portrait:top-1/2 portrait:aspect-video portrait:-translate-y-1/2 portrait:[mask-image:linear-gradient(to_bottom,transparent,#000_8%,#000_92%,transparent)]">
+        <video
+          ref={videoRef}
+          className="h-full w-full object-cover"
+          poster="/intro/poster.jpg"
+          preload="auto"
+          muted
+          playsInline
+          autoPlay
+          onEnded={finish}
+          onError={finish}
+          aria-hidden="true"
+        >
+          <source src="/intro/intro.webm" type="video/webm" />
+          <source src="/intro/intro.mp4" type="video/mp4" />
+        </video>
+      </div>
 
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink/80 via-transparent to-ink/25" />
 
       <div
-        className={`pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-16 text-center transition-all duration-500 ease-out sm:pb-20 ${
+        className={`pointer-events-none absolute inset-x-0 bottom-0 px-6 pb-16 text-center transition-all duration-500 ease-out sm:pb-20 portrait:bottom-auto portrait:top-[calc(50%+28.125vw+1.75rem)] portrait:pb-0 ${
           showTitle && !stalled ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'
         }`}
       >

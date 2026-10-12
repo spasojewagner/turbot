@@ -11,7 +11,16 @@ import type { ChatMessage, Source, Stage } from '@/hooks/useChat';
 const markdown: Components = {
   p: ({ node, ...props }) => <p {...props} className="mb-3 leading-[1.7] last:mb-0" />,
   ul: ({ node, ...props }) => <ul {...props} className="mb-3 space-y-1.5 last:mb-0" />,
-  ol: ({ node, ...props }) => <ol {...props} className="mb-4 space-y-3 last:mb-0" />,
+  /**
+   * Numerisana lista zadržava brojeve (ponuda 1, ponuda 2), a tačka iz `li`
+   * se u njoj gasi. Ranije su obe vrste liste izgledale isto.
+   */
+  ol: ({ node, ...props }) => (
+    <ol
+      {...props}
+      className="mb-4 list-decimal space-y-3 pl-5 marker:font-mono marker:text-sm marker:text-amber last:mb-0 [&>li]:pl-1 [&>li]:before:hidden"
+    />
+  ),
   li: ({ node, ...props }) => (
     <li
       {...props}
